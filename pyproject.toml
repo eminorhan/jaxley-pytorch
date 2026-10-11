@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jaxley-pytorch"
+version = "0.1.0"
+description = "A PyTorch port of Jaxley: differentiable simulation of biophysical neuron models."
+requires-python = ">=3.10"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+keywords = ["neuroscience", "biophysics", "simulator", "pytorch"]
+dependencies = [
+    "torch>=2.4",
+    "numpy",
+    "pandas>=2.2.0",
+    "networkx",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = [
+    "slow: marks tests as slow (T > 10s)",
+    "regression: marks regression tests",
+]
+
+[tool.isort]
+profile = "black"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jaxley_pytorch*"]

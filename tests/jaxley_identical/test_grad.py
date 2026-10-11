@@ -1,0 +1,105 @@
+# This file is part of jaxley-pytorch, a PyTorch port of Jaxley, a differentiable
+# neuroscience simulator. Jaxley is licensed under the Apache License Version 2.0, see
+# <https://www.apache.org/licenses/>
+
+
+
+import os
+
+
+from math import pi
+
+from tests.helpers import np
+import torch
+import pytest
+from tests.helpers import value_and_grad
+
+import jaxley_pytorch as jx
+from jaxley_pytorch.channels import HH
+from jaxley_pytorch.connect import fully_connect
+from jaxley_pytorch.synapses import IonotropicSynapse, TestSynapse
+
+
+@pytest.mark.slow
+def test_network_grad(SimpleNet):
+    net = SimpleNet(7, 5, 4)
+    net.insert(HH())
+
+    _ = np.random.seed(0)
+    pre = net.cell([0, 1, 2])
+    post = net.cell([3, 4, 5])
+    fully_connect(pre, post, IonotropicSynapse(), random_post_comp=True)
+    fully_connect(pre, post, TestSynapse(), random_post_comp=True)
+
+    pre = net.cell([3, 4, 5])
+    post = net.cell(6)
+    fully_connect(pre, post, IonotropicSynapse(), random_post_comp=True)
+    fully_connect(pre, post, TestSynapse(), random_post_comp=True)
+
+    area = 2 * pi * 10.0 * 1.0
+    point_process_to_dist_factor = 100_000.0 / area
+
+    net.set("IonotropicSynapse_gS", 0.44 / point_process_to_dist_factor)
+    net.set("TestSynapse_gC", 0.62 / point_process_to_dist_factor)
+    net.IonotropicSynapse.edge([0, 2, 4]).set(
+        "IonotropicSynapse_gS", 0.32 / point_process_to_dist_factor
+    )
+    net.TestSynapse.edge([0, 3, 5]).set(
+        "TestSynapse_gC", 0.24 / point_process_to_dist_factor
+    )
+
+    current = jx.step_current(
+        i_delay=0.5, i_dur=0.5, i_amp=0.1, delta_t=0.025, t_max=10.0
+    )
+    for i in range(3):
+        net.cell(i).branch(0).loc(0.0).stimulate(current)
+
+    net.cell(6).branch(0).loc(0.0).record()
+
+    def simulate(params):
+        return torch.sum(
+            jx.integrate(net, params=params, voltage_solver="jaxley.dhs.cpu")[0, ::40]
+        )
+
+    net.make_trainable("HH_gNa")
+    net.cell([0, 1, 4]).make_trainable("HH_gK")
+    net.cell("all").make_trainable("HH_gLeak")
+
+    net.IonotropicSynapse.make_trainable("IonotropicSynapse_gS")
+    net.TestSynapse.edge([0, 2]).make_trainable("TestSynapse_gC")
+
+    params = net.get_parameters()
+    grad_fn = value_and_grad(simulate)
+    v, g = grad_fn(params)
+
+    value_300724 = np.asarray(-592.26920963)
+    max_error = np.max(np.abs(np.asarray(v) - np.asarray(value_300724)))
+    tolerance = 1e-8
+    assert max_error <= tolerance, f"Error is {max_error} > {tolerance}"
+    grad_300724 = [
+        {"HH_gNa": np.asarray([-1420.82493379])},
+        {"HH_gK": np.asarray([36.76796492, 14.50837022, 127.31361882])},
+        {
+            "HH_gLeak": np.asarray(
+                [
+                    -1511.83061117,
+                    -657.06543355,
+                    -276.59064858,
+                    -348.48049676,
+                    -10613.6754718,
+                    -1240.62600873,
+                    -268475.23225046,
+                ]
+            )
+        },
+        {"IonotropicSynapse_gS": np.asarray([-149134.15237682])},
+        {"TestSynapse_gC": np.asarray([-75.34438431, -163.50398586])},
+    ]
+
+    for true_g, new_g in zip(grad_300724, g):
+        for key in true_g:
+            max_error = np.max(np.abs(np.asarray(true_g[key]) - np.asarray(new_g[key])))
+            tolerance = 1e-3  # Leak cond has a huge gradient...
+            assert (
+                max_error <= tolerance
+            ), f"Error for {key} is {max_error} > {tolerance}"

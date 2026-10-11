@@ -1,0 +1,102 @@
+# This file is part of jaxley-pytorch, a PyTorch port of Jaxley, a differentiable
+# neuroscience simulator. Jaxley is licensed under the Apache License Version 2.0, see
+# <https://www.apache.org/licenses/>
+from typing import Optional
+
+from torch import Tensor as Array
+from torch import Tensor as ArrayLike
+
+
+class Synapse:
+    """Base class for a synapse.
+
+    As in NEURON, a `Synapse` is considered a point process, which means that its
+    conductances are to be specified in `uS` and its currents are to be specified in
+    `nA`.
+    """
+
+    _name = None
+    synapse_params = None
+    synapse_states = None
+
+    def __init__(self, name: Optional[str] = None):
+        self._name = name if name else self.__class__.__name__
+
+    @property
+    def name(self) -> Optional[str]:
+        return self._name
+
+    def change_name(self, new_name: str):
+        """Change the synapse name.
+
+        Args:
+            new_name: The new name of the channel.
+
+        Returns:
+            Renamed channel, such that this function is chainable.
+        """
+        old_prefix = self._name + "_"
+        new_prefix = new_name + "_"
+
+        self._name = new_name
+        self.synapse_params = {
+            (
+                new_prefix + key[len(old_prefix) :]
+                if key.startswith(old_prefix)
+                else key
+            ): value
+            for key, value in self.synapse_params.items()
+        }
+
+        self.synapse_states = {
+            (
+                new_prefix + key[len(old_prefix) :]
+                if key.startswith(old_prefix)
+                else key
+            ): value
+            for key, value in self.synapse_states.items()
+        }
+        return self
+
+    def update_states(
+        states: dict[str, Array],
+        delta_t: float,
+        pre_voltage: ArrayLike,
+        post_voltage: ArrayLike,
+        params: dict[str, Array],
+    ) -> dict[str, Array]:
+        """ODE update step.
+
+        Args:
+            states: States of the synapse.
+            delta_t: Time step in `ms`.
+            pre_voltage: Voltage of the presynaptic compartment, shape `()`.
+            post_voltage: Voltage of the postsynaptic compartment, shape `()`.
+            params: Parameters of the synapse. Conductances in `uS`.
+
+        Returns:
+            Updated states."""
+        raise NotImplementedError
+
+    def compute_current(
+        states: dict[str, Array],
+        pre_voltage: ArrayLike,
+        post_voltage: ArrayLike,
+        params: dict[str, Array],
+    ) -> Array:
+        """Return current through one synapse in `nA`.
+
+        Internally, this function is applied to tensors of all synapses at once (it is
+        vectorized by broadcasting), with an optional leading dimension of size 2 for
+        the perturbed voltage.
+
+        Args:
+            states: States of the synapse.
+            pre_voltage: Voltage of the presynaptic compartment, shape `()`.
+            post_voltage: Voltage of the postsynaptic compartment, shape `()`.
+            params: Parameters of the synapse. Conductances in `uS`.
+
+        Returns:
+            Current through the synapse in `nA`, shape `()`.
+        """
+        raise NotImplementedError
