@@ -25,7 +25,9 @@ Every network has `n` neurons, 80% of them excitatory. Every neuron receives 100
 synapses, 80 from random excitatory and 20 from random inhibitory neurons (no
 autapses), and Dale's law holds: all synapses of a neuron have the sign of its type.
 The trainable synaptic weights are `softplus(theta) * scale`, so they cannot change
-sign.
+sign. The synapses are created in order of the postsynaptic neuron (its excitatory
+inputs first), the layout for which jaxley_pytorch steps them with fused GPU kernels
+(see "Throughput" below).
 
 Every character is presented for 5 ms of network time: a learned vector of input
 currents (one per neuron, as a current density), constant over the 5 ms, is injected
@@ -47,7 +49,8 @@ transmitter when the presynaptic voltage exceeds -20 mV (slope 2 mV), i.e. at sp
 The input scales were set so that the untrained networks fire at 25-45 Hz when driven
 by text (`train.py --mode activity`).
 
-Two synapse models are the example's own:
+The two synapse models were written for this example and are now part of
+jaxley_pytorch (`jaxley_pytorch.synapses`, not in Jaxley):
 
 * **Rate synapses.** Jaxley's `TanhRateSynapse` multiplies the weight by a tanh of the
   presynaptic voltage, which is negative below its offset, so an excitatory synapse
@@ -63,9 +66,7 @@ Pospischil channels (and jaxley-mech's retinal ganglion cell channels) computed 
 which float32 voltages hit now and then (the NaN then spreads through the network);
 and `IonotropicSynapse` computed its time constant as `(1 - s_inf) / k_minus`, which
 is 0, with a NaN gradient, once a steep release saturates (`s_inf` rounds to 1 during
-a spike). The results below were computed before that fix, with float32-safe copies of
-the HH and Pospischil channels in the example; the library's channels now agree with
-those copies to round-off, and the example uses them.
+a spike).
 
 ## Training (`train.py`)
 
@@ -90,59 +91,71 @@ python train.py --mode sample --out <dir of a training run>        # generate te
 
 ### Throughput
 
-One NVIDIA H100 (80 GB) unless noted, float32, 32 streams of 32 characters per step
-(1,024 characters), 5 ms of network time per character (10 solver steps for `rate`,
-200 for the spiking models); `train.py --mode bench`. Rows with batch 8 are the
-largest networks, which only fit with 8 streams and checkpointing inside every
+One NVIDIA H100 (80 GB), float32, 32 streams of 32 characters per step (1,024
+characters), 5 ms of network time per character (10 solver steps for `rate`, 200 for
+the spiking models); `train.py --mode bench`. Rows with batch 8 are the largest
+networks of their model, which only fit with 8 streams and checkpointing inside every
 character's simulation. 100M characters are about 100,000 steps of 1,024 characters.
 
 | model | neurons | synapses | solver step (ms) | batch | ms per solver step | characters / s | days per 100M characters | peak GPU memory (GB) | GPU |
 |---|---|---|---|---|---|---|---|---|---|
-| gru | 1,024 | - | - | 32 | - | 535,732 | 0.00216 | 0.4 | H100 |
-| gru | 4,096 | - | - | 32 | - | 87,981 | 0.0132 | 2.9 | H100 |
-| gru | 16,384 | - | - | 32 | - | 5,933 | 0.195 | 40.0 | H100 |
-| rate | 1,024 | 102,400 | 0.5 | 32 | 0.73 | 4,372 | 0.265 | 1.5 | H100 |
-| rate | 2,048 | 204,800 | 0.5 | 32 | 1.33 | 2,406 | 0.481 | 2.9 | H100 |
-| rate | 4,096 | 409,600 | 0.5 | 32 | 2.48 | 1,292 | 0.896 | 5.6 | H100 |
-| rate | 8,192 | 819,200 | 0.5 | 32 | 4.81 | 666 | 1.74 | 11.0 | H100 |
-| rate | 16,384 | 1,638,400 | 0.5 | 32 | 10.43 | 307 | 3.77 | 22.0 | H100 |
-| rate | 32,768 | 3,276,800 | 0.5 | 32 | 21.14 | 151 | 7.65 | 43.8 | H100 |
-| rate | 65,536 | 6,553,600 | 0.5 | 8 | 10.35 | 77 | 15 | 73.8 | H100 |
-| hh | 1,024 | 102,400 | 0.025 | 32 | 0.80 | 199 | 5.82 | 12.8 | H100 |
-| hh | 2,048 | 204,800 | 0.025 | 32 | 1.44 | 111 | 10.4 | 24.6 | H100 |
-| hh | 4,096 | 409,600 | 0.025 | 32 | 2.81 | 57 | 20.3 | 49.1 | H100 |
-| hh | 8,192 | 819,200 | 0.025 | 8 | 1.63 | 25 | 47.1 | 55.4 | H100 |
-| pospischil | 1,024 | 102,400 | 0.025 | 32 | 0.87 | 184 | 6.29 | 13.1 | H100 |
-| pospischil | 2,048 | 204,800 | 0.025 | 32 | 1.50 | 106 | 10.9 | 25.1 | H100 |
-| pospischil | 4,096 | 409,600 | 0.025 | 32 | 2.87 | 56 | 20.7 | 50.0 | H100 |
-| pospischil | 8,192 | 819,200 | 0.025 | 8 | 1.69 | 24 | 48.9 | 55.9 | H100 |
-| pospischil | 16,384 | 1,638,400 | 0.025 | 8 | 3.00 | 13 | 86.9 | 110.3 | H200 |
-| l5pc | 1,024 | 102,400 | 0.025 | 32 | 1.00 | 160 | 7.23 | 15.0 | H100 |
-| l5pc | 2,048 | 204,800 | 0.025 | 32 | 1.73 | 93 | 12.5 | 29.2 | H100 |
-| l5pc | 4,096 | 409,600 | 0.025 | 32 | 3.23 | 50 | 23.3 | 58.3 | H100 |
-| l5pc | 8,192 | 819,200 | 0.025 | 8 | 1.89 | 21 | 54.5 | 67.6 | H100 |
+| gru | 1,024 | - | - | 32 | - | 477,749 | 0.00242 | 0.4 | H100 |
+| gru | 2,048 | - | - | 32 | - | 250,845 | 0.00461 | 0.9 | H100 |
+| gru | 4,096 | - | - | 32 | - | 86,545 | 0.0134 | 2.9 | H100 |
+| gru | 16,384 | - | - | 32 | - | 5,939 | 0.195 | 40.0 | H100 |
+| rate | 1,024 | 102,400 | 0.5 | 32 | 0.18 | 18,013 | 0.0643 | 0.2 | H100 |
+| rate | 2,048 | 204,800 | 0.5 | 32 | 0.26 | 12,486 | 0.0927 | 0.4 | H100 |
+| rate | 4,096 | 409,600 | 0.5 | 32 | 0.46 | 7,004 | 0.165 | 0.8 | H100 |
+| rate | 8,192 | 819,200 | 0.5 | 32 | 0.93 | 3,441 | 0.336 | 1.5 | H100 |
+| rate | 16,384 | 1,638,400 | 0.5 | 32 | 1.77 | 1,806 | 0.641 | 3.0 | H100 |
+| rate | 32,768 | 3,276,800 | 0.5 | 32 | 3.49 | 917 | 1.26 | 6.1 | H100 |
+| rate | 65,536 | 6,553,600 | 0.5 | 32 | 7.01 | 457 | 2.54 | 12.1 | H100 |
+| rate | 131,072 | 13,107,200 | 0.5 | 32 | 14.13 | 226 | 5.11 | 24.2 | H100 |
+| rate | 262,144 | 26,214,400 | 0.5 | 32 | 28.40 | 113 | 10.3 | 48.4 | H100 |
+| hh | 1,024 | 102,400 | 0.025 | 32 | 0.21 | 771 | 1.5 | 3.6 | H100 |
+| hh | 2,048 | 204,800 | 0.025 | 32 | 0.33 | 485 | 2.39 | 7.2 | H100 |
+| hh | 4,096 | 409,600 | 0.025 | 32 | 0.62 | 259 | 4.48 | 13.9 | H100 |
+| hh | 8,192 | 819,200 | 0.025 | 32 | 1.20 | 134 | 8.65 | 27.7 | H100 |
+| hh | 16,384 | 1,638,400 | 0.025 | 32 | 2.33 | 69 | 16.8 | 55.2 | H100 |
+| hh | 32,768 | 3,276,800 | 0.025 | 8 | 1.36 | 29 | 39.3 | 80.5 | H100 |
+| pospischil | 1,024 | 102,400 | 0.025 | 32 | 0.24 | 658 | 1.76 | 3.8 | H100 |
+| pospischil | 2,048 | 204,800 | 0.025 | 32 | 0.38 | 425 | 2.73 | 7.7 | H100 |
+| pospischil | 4,096 | 409,600 | 0.025 | 32 | 0.67 | 238 | 4.86 | 14.8 | H100 |
+| pospischil | 8,192 | 819,200 | 0.025 | 32 | 1.27 | 126 | 9.16 | 29.4 | H100 |
+| pospischil | 16,384 | 1,638,400 | 0.025 | 32 | 2.48 | 65 | 17.9 | 58.8 | H100 |
+| l5pc | 1,024 | 102,400 | 0.025 | 32 | 0.55 | 293 | 3.95 | 5.8 | H100 |
+| l5pc | 2,048 | 204,800 | 0.025 | 32 | 0.80 | 200 | 5.8 | 11.7 | H100 |
+| l5pc | 4,096 | 409,600 | 0.025 | 32 | 1.36 | 118 | 9.84 | 22.9 | H100 |
+| l5pc | 8,192 | 819,200 | 0.025 | 32 | 2.48 | 64 | 18 | 45.6 | H100 |
+| l5pc | 16,384 | 1,638,400 | 0.025 | 8 | 1.46 | 27 | 42.2 | 65.1 | H100 |
 
-* The cost is set by the synapses, not the neuron model: all biophysical networks take
-  0.7-1.0 ms per solver step at 1,024 neurons (100k synapses, 32 streams; forward,
-  recomputation and backward pass together), i.e. about 4 billion synapse-steps per
-  second, and the time grows linearly with the number of synapses. The
-  three-compartment L5PC units with ten channel types cost only 25% more than
+* **The synapse step.** With the synapses ordered by postsynaptic neuron, jaxley_pytorch
+  sums the currents of every neuron's synapses instead of scattering them with atomic
+  adds, and on CUDA it simulates both synapse models with fused Triton kernels
+  (`jaxley_pytorch/kernels/synapse_step.py`): per solver step, one forward kernel
+  (synapse states, presynaptic voltages, the current terms summed per neuron) and one
+  backward kernel, with only the synapse states kept for the backward pass. At 1,024
+  neurons (100k synapses, 32 streams; forward pass, recomputation and backward pass
+  together) a solver step takes 0.18 ms (`rate`), 0.21 ms (Hodgkin-Huxley), 0.24 ms
+  (Pospischil) and 0.55 ms (L5PC). The point-neuron networks update 14-18 billion
+  synapses per second at 1,024 neurons and more in larger networks (`rate` 30 billion
+  from 4,096 neurons on, Hodgkin-Huxley and Pospischil 21-22 billion at 16,384). The
+  three-compartment L5PC units with ten channel types cost 2.6 times as much as
   Hodgkin-Huxley point neurons.
-* Characters per second are therefore set by the solver steps per character: the rate
-  model (0.5 ms steps) is 22-27x faster than the spiking models at the same size. With a
-  0.05 ms step, the spiking models are 2x faster (e.g. Hodgkin-Huxley: 405, 227, 117
-  and 55 characters/s at 1,024 to 8,192 neurons, 25 at 16,384), at a cost in accuracy
-  (below).
-* Largest networks that train on one H100: `rate` 65,536 neurons (6.6M synapses,
-  batch 8); the spiking models 8,192 (batch 8; 16,384 with a 0.05 ms step), and
-  Pospischil 16,384 at 0.025 ms on an H200 (141 GB). 131,072 rate neurons and 32,768
-  spiking neurons ran out of memory in every configuration tried. Building a network
-  takes about 18 ms per neuron (20 min for 65,536); compilation and graph capture
-  20 s to 7 min.
-* 100,000 steps of 1,024 characters in under a week: the rate model up to 16,384
-  neurons (3.8 days; 32,768 take 7.7); Hodgkin-Huxley and Pospischil networks of
-  1,024 neurons with the 0.025 ms step (5.8 and 6.3 days; L5PC 7.2), or of 2,048 with
-  the 0.05 ms step (5.1 and 5.3 days).
+* Characters per second are set by the solver steps per character: the rate model
+  (0.5 ms steps) is 23-27x faster than Hodgkin-Huxley networks of the same size.
+* **Largest networks on one H100**: `rate` 262,144 neurons (26M synapses) at batch 32
+  (48 GB; the largest size tried); Hodgkin-Huxley 32,768 (batch 8); Pospischil 16,384
+  (batch 32) and L5PC 16,384 (batch 8). 65,536 Hodgkin-Huxley neurons and 32,768
+  Pospischil or L5PC neurons ran out of memory. Building a network takes about 18 ms
+  per neuron (83 min for 262,144); compilation and graph capture 20 s to 32 min.
+* **100,000 steps of 1,024 characters in under a week**: the rate model up to 65,536
+  neurons (2.5 days; 131,072 take 5.1), Hodgkin-Huxley and Pospischil networks up to
+  4,096 neurons (4.5 and 4.9 days), L5PC up to 2,048 (5.8 days).
+* Of a solver step of the Hodgkin-Huxley network of 1,024 neurons (215 us of GPU time,
+  `diagnose/profile_step.py`), the synapse kernels take 100 us; the rest are the
+  channels, the voltage solve and about 60 small kernels (among them the backward pass
+  of the recording, an `index` outside the compiled step, 16 us with a sort).
 
 ### Training
 
@@ -151,18 +164,18 @@ Four hours per biophysical network, one hour per GRU, learning rate 3e-3 unless 
 
 | model | neurons | learning rate | parameters | characters trained | hours | characters / s | train bpc (last 100 steps) | validation bpc |
 |---|---|---|---|---|---|---|---|---|
-| gru | 192 | 0.003 | 0.25M | 2,398.2M | 1.0 | 1,016,079 | 1.68 | 1.75 |
-| gru | 192 | 0.001 | 0.25M | 2,344.8M | 1.0 | 1,026,031 | 1.62 | 1.66 |
-| gru | 192 | 0.0003 | 0.25M | 2,002.0M | 1.0 | 1,032,941 | 1.14 | 1.22 |
-| gru | 1,024 | 0.003 | 6.45M | 1,585.3M | 1.0 | 535,399 | 1.65 | 1.79 |
-| gru | 1,024 | 0.001 | 6.45M | 1,488.6M | 1.0 | 481,013 | 1.39 | 1.59 |
-| gru | 1,024 | 0.0003 | 6.45M | 1,484.4M | 1.0 | 476,583 | 1.36 | 1.39 |
-| rate | 1,024 | 0.003 | 0.26M | 61.0M | 4.0 | 4,372 | 2.04 | 2.11 |
-| rate | 16,384 | 0.003 | 4.10M | 3.9M | 4.0 | 308 | 2.68 | 2.83 |
-| hh | 1,024 | 0.003 | 0.26M | 2.9M | 4.0 | 206 | 3.24 | 3.19 |
-| pospischil | 1,024 | 0.003 | 0.26M | 2.6M | 4.0 | 184 | 2.99 | 3.04 |
-| pospischil | 4,096 | 0.003 | 1.02M | 0.7M | 4.0 | 55 | 2.81 | 2.84 |
-| l5pc | 1,024 | 0.003 | 0.26M | 2.0M | 4.0 | 147 | 2.35 | 2.52 |
+| gru | 192 | 0.003 | 0.25M | 2,306.6M | 1.0 | 1,006,318 | 1.71 | 1.76 |
+| gru | 192 | 0.001 | 0.25M | 2,310.7M | 1.0 | 1,013,921 | 1.54 | 1.61 |
+| gru | 192 | 0.0003 | 0.25M | 2,361.9M | 1.0 | 1,027,258 | 1.13 | 1.23 |
+| gru | 1,024 | 0.003 | 6.45M | 1,474.2M | 1.0 | 476,160 | 1.65 | 2.08 |
+| gru | 1,024 | 0.001 | 6.45M | 1,477.8M | 1.0 | 478,655 | 1.37 | 1.59 |
+| gru | 1,024 | 0.0003 | 6.45M | 1,477.5M | 1.0 | 478,975 | 1.33 | 1.38 |
+| rate | 1,024 | 0.003 | 0.26M | 281.8M | 4.0 | 20,359 | 1.72 | 1.93 |
+| rate | 16,384 | 0.003 | 4.10M | 18.9M | 4.0 | 1,806 | 2.15 | 2.47 |
+| hh | 1,024 | 0.003 | 0.26M | 10.6M | 4.0 | 774 | 3.18 | 3.16 |
+| pospischil | 1,024 | 0.003 | 0.26M | 8.7M | 4.0 | 650 | 3.05 | 3.06 |
+| pospischil | 4,096 | 0.003 | 1.02M | 2.9M | 4.0 | 237 | 2.78 | 2.78 |
+| l5pc | 1,024 | 0.003 | 0.26M | 3.7M | 4.0 | 291 | 2.39 | 2.54 |
 
 The same models after the same number of characters (training loss in bits per
 character, mean over the logging window), i.e. what they learn from equal data:
@@ -172,44 +185,50 @@ character, mean over the logging window), i.e. what they learn from equal data:
 | gru | 192 | 0.003 | 1.85 | 1.71 | 1.57 | 1.49 | 1.67 |
 | gru | 192 | 0.0003 | 2.55 | 2.16 | 1.84 | 1.61 | 1.33 |
 | gru | 1,024 | 0.0003 | 1.79 | 1.59 | 1.40 | 1.28 | 1.09 |
-| rate | 1,024 | 0.003 | 3.27 | 3.11 | 2.89 | 2.66 | 2.11 |
-| rate | 16,384 | 0.003 | 3.21 | 3.03 | 2.82 | - | - |
-| hh | 1,024 | 0.003 | 3.50 | 3.31 | 3.19 | - | - |
-| pospischil | 1,024 | 0.003 | 3.12 | 3.03 | 2.98 | - | - |
-| pospischil | 4,096 | 0.003 | 2.91 | - | - | - | - |
-| l5pc | 1,024 | 0.003 | 2.56 | 2.40 | 2.35 | - | - |
+| rate | 1,024 | 0.003 | 3.21 | 3.11 | 2.96 | 2.67 | 2.08 |
+| rate | 16,384 | 0.003 | 3.24 | 3.06 | 2.91 | 2.59 | - |
+| hh | 1,024 | 0.003 | 3.49 | 3.36 | 3.25 | 3.23 | - |
+| pospischil | 1,024 | 0.003 | 3.10 | 3.09 | 3.06 | 3.04 | - |
+| pospischil | 4,096 | 0.003 | 2.93 | 2.88 | 2.74 | - | - |
+| l5pc | 1,024 | 0.003 | 2.57 | 2.43 | 2.39 | - | - |
 
 * All biophysical networks learn. Per character of data, the three-compartment L5PC
-  network learns fastest (2.40 bpc after 1M characters, vs 3.0-3.3 for the other
+  network learns fastest (2.43 bpc after 1M characters, vs 3.1-3.4 for the other
   networks of 1,024 neurons), and the 4,096-neuron Pospischil network beats the
-  1,024-neuron one at a quarter of the data. They remain far behind a GRU of the same
-  parameter count (192 units: 1.7-2.2 bpc after 1M characters).
-* In four hours the rate network sees 20-30x more characters than the spiking ones
-  and gets furthest (2.11 bpc). The learning rate was not tuned for the biophysical
-  networks; for the GRUs, 3e-3 is too high beyond ~10M characters (the loss rises
-  again) and 3e-4 is best.
+  1,024-neuron one (2.74 vs 3.06 bpc after 2M characters). They remain far behind a
+  GRU of the same parameter count (192 units: 1.7-2.2 bpc after 1M characters).
+* In four hours the rate network of 1,024 neurons sees 282M characters, 27-76x more
+  than the spiking networks of its size, and gets furthest (1.93 bpc); the one of
+  16,384 neurons learns more per character (2.59 vs 2.67 bpc after 5M characters).
+* The Hodgkin-Huxley and Pospischil networks of 1,024 neurons stop improving after
+  about 2M characters (3.25 and 3.06 bpc at 2M, 3.23 and 3.04 at 5M): at this learning
+  rate, which was not tuned for the biophysical networks, more data does not help them.
+  For the GRUs, 3e-3 is too high beyond ~10M characters (the loss rises again) and
+  3e-4 is best.
 
 Samples (`train.py --mode sample`, temperature 0.8, after the prompt "Once upon a
 time"; the first 200 characters of the first sample):
 
-* GRU, 192 units (1.22 bpc): ", there was a little girl named Lily. Lily loved to
-  play with a fierce dog. One day, Max saw a little boy named Tom went for a walk.
-  Sue was smart and she was fun."
-* rate, 1,024 (2.11 bpc): ", there we rac happy and traic to t a bir dack and dad
-  ally smiled and said, "Good ar undireatise. She quickly. They were very happy and
-  toghe from the goo dis tow ar"
-* L5PC, 1,024 (2.52 bpc): "rowhopprd. Tom s fe can sortsomed tore spiny wand."
-  She was a bright upon the want the froplentith the watche friend. "I spicy shad for
-  an I avery but lake"
-* Pospischil, 4,096 (2.84 bpc): ", to she sa ha bis candi nte scaus au shi beg acked f
-  and acm and ald natt heral Tim thery and ad and Maxce care une the ply as bire was"
-* Hodgkin-Huxley, 1,024 (3.19 bpc): ", to srd ny tr t s d noioutsyareom tumes. Yhe nd.
-  The playay. Tit wed tuttano and ane the bat ad toee toed Bent t erilas a rd he so"
+* GRU, 192 units (1.23 bpc): ". <end of story> Once upon a time, there was a little
+  girl named Mary. She smiled and said, "Are you the pond is being quick." Tom and Sam
+  said to Tom. Tim was so happy. He saw Tim and Lily and said,"
+* rate, 1,024 (1.93 bpc): ", there was a read of new. You can playing in the park
+  poties. Tim wanted to mean Tim went to the big ronce and toudell hop in the ofelcing
+  it wourde." The bird saw a red blanck. They ablo could not m"
+* L5PC, 1,024 (2.54 bpc): "d atung do fring frog norkyt, So, a bug smile mad came and
+  he cat hardenthe nowan f ontet to help. They mech and the rinds and shiny. She they
+  plare tole. Hime, theted to he said, "Whing im lanth in m"
+* Pospischil, 4,096 (2.78 bpc): ", to sad ty tas te can itrte sow a said toy gandy day
+  and osm and alde hit lovee fin tey poan to bead Maick and litell bo and the of loo ke
+  hir big tole. Hik therwte stis the moks. She too la tilid d"
+* Hodgkin-Huxley, 1,024 (3.16 bpc): ", to srd.ty was very n iout, youl. The k. The bay,
+  be looook rith ld be toSe ans ant toy anthad toeed, cd cakt b e ithe jorpl rdog was a
+  brg Her Itele a big, br tad the the The fe wabal lin a aol"
 
 ### What it took to make the spiking networks train
 
 * **The solver step.** One neuron, a noisy current for 1 s, spikes compared with a
-  0.0125 ms reference (`diagnose/dt_accuracy.py` on /nrs):
+  0.0125 ms reference (`diagnose/dt_accuracy_v2.py` on /nrs):
 
   | model | step 0.1 ms | 0.05 ms | 0.025 ms |
   |---|---|---|---|
@@ -219,27 +238,35 @@ time"; the first 200 characters of the first sample):
   | Pospischil RS: median spike shift | 4.5 ms | 1.6 ms | 0.53 ms |
 
   (float32 and float64 gave the same spikes.) At 0.05 ms, the gradients through the
-  recurrent spiking dynamics also grew far faster: the gradient norm of the input
-  weights of the Pospischil network over 16 characters was 2.7e5 at 0.05 ms and 55 at
-  0.025 ms (0.56 without recurrent synapses), and that network did not learn at all.
+  recurrent spiking dynamics also grow far faster: the gradient norm of the input
+  weights of the Pospischil network of 1,024 neurons over 16 characters is 1.1e6 at
+  0.05 ms and 1.4e3 at 0.025 ms (0.56 without recurrent synapses;
+  `diagnose/grad_norms.py`).
 * **Clipping every parameter tensor's gradient on its own** (rather than all
   together), so that large gradients through the network dynamics do not scale down
-  the readout's. After 150 steps of the Pospischil network of 1,024 neurons: 3.28 bpc
-  (per tensor), 3.75 (all together, with an unstable stretch), 3.32 (per tensor, and
-  the gradient through the state also truncated every 8 characters).
+  the readout's. After 150 steps of the Pospischil network of 1,024 neurons: 3.33 bpc
+  (per tensor), 8.01 (all together; 3.76 after 120 steps, then it diverged), 3.34 (per
+  tensor, and the gradient through the state also truncated every 8 characters).
 * **The readout's learning rate scaled by 1024 / n**: with Adam, a logit moves by
-  about the learning rate times n per step, and unscaled networks of 4,096 neurons
-  and more diverged.
+  about the learning rate times n per step. After 150 steps, the rate network of
+  8,192 neurons is at 3.44 bpc with the scaled learning rate and at 7.87 bpc without
+  it (15.5 after 30 steps).
 
 ### Next steps
 
-* A fused GPU kernel for the synapses (gather the presynaptic voltages, update the
-  synapse states, scatter the currents, forward and backward) would attack the actual
-  bottleneck; a rough estimate of the memory traffic per synapse update suggests 2-4x.
-* Tune the learning rate (and a schedule) for the biophysical networks; train longer
-  and at the larger sizes.
+* Tune the learning rate (and a schedule) for the biophysical networks: the spiking
+  networks of 1,024 neurons stop improving after about 2M characters at 3e-3.
+* Train the larger networks (spiking networks of up to 16,384 neurons fit at batch 32
+  on one H100) and for longer.
+* The synapse kernels: the forward kernel reaches about 1 TB/s, as does the one
+  `torch.compile` generates (its limit was not found; there was no access to the GPU's
+  performance counters).
+* The rest of the solver step: the backward pass of the recording (an `index` with a
+  sort, 16 us per solver step) and many small kernels; and building large networks
+  (18 ms per neuron).
 
-All runs: `/nrs/scicompsoft/orhane/probes/jaxley_pytorch/language_modeling`
-(`bench`, `bench_dt0025`, `bench_h200`: throughput; `train`, `train_gru_lr`: training
-runs with `result.json`, `model.pt`, `samples.json`; `jobs`: logs; `diagnose`: the
-NaN, gradient and solver-step probes). Tables: `summarize.py`; figure: `plot_results.py`.
+All runs: `/nrs/scicompsoft/orhane/probes/jaxley_pytorch/language_modeling/v2`
+(`bench`: throughput; `train`: training runs with `result.json`, `model.pt`,
+`samples.json`; `ablation`; `calibrate`: activity of the untrained networks; `jobs`:
+logs), the probes in `../diagnose` (profiler, solver step, gradient norms). Tables:
+`summarize.py`; figure: `plot_results.py`.

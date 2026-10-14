@@ -61,7 +61,7 @@ def main():
     ax1.set_yscale("log")
     ax1.set_xlabel("neurons (100 synapses each; GRU: units, dense)")
     ax1.set_ylabel("training throughput (characters / s)")
-    ax1.set_title("Throughput on one H100 (batch 32, float32)", color=TEXT, fontsize=11, loc="left")
+    ax1.set_title("Throughput on one H100 (float32; batch 32, the largest batch 8)", color=TEXT, fontsize=11, loc="left")
     style(ax1)
     ax1.legend(frameon=False, fontsize=8.5, labelcolor=TEXT2, loc="upper right")
 

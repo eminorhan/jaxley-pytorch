@@ -1,11 +1,30 @@
 # This file is part of jaxley-pytorch, a PyTorch port of Jaxley, a differentiable
 # neuroscience simulator. Jaxley is licensed under the Apache License Version 2.0, see
 # <https://www.apache.org/licenses/>
+from typing import Optional, Tuple
+
 import numpy as np
 import torch
 from torch import Tensor
 
 from jaxley_pytorch.utils.torch_utils import as_index
+
+
+def regular_layout(post_syn_comp_inds) -> Optional[Tuple[int, np.ndarray]]:
+    """`(k, targets)` if the synapses are ordered by postsynaptic compartment with `k`
+    synapses per compartment, else `None` (not part of Jaxley).
+
+    `targets` are the postsynaptic compartments, in increasing order (the synapses of
+    `targets[i]` are `i * k` to `(i + 1) * k - 1`).
+    """
+    post = np.asarray(post_syn_comp_inds)
+    if post.ndim != 1 or len(post) == 0:
+        return None
+    starts = np.flatnonzero(np.r_[True, post[1:] != post[:-1]])
+    counts = np.diff(np.r_[starts, len(post)])
+    if np.any(counts != counts[0]) or np.any(np.diff(post[starts]) <= 0):
+        return None
+    return int(counts[0]), post[starts]
 
 
 def gather_synapes(

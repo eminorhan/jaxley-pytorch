@@ -3,6 +3,8 @@
 # <https://www.apache.org/licenses/>
 
 from jaxley_pytorch.synapses.ionotropic import IonotropicSynapse
+from jaxley_pytorch.synapses.kinetic import KineticSynapse
+from jaxley_pytorch.synapses.sigmoid_rate import SigmoidRateSynapse
 from jaxley_pytorch.synapses.synapse import Synapse
 from jaxley_pytorch.synapses.tanh_conductance import TanhConductanceSynapse
 from jaxley_pytorch.synapses.tanh_rate import TanhRateSynapse
@@ -10,6 +12,8 @@ from jaxley_pytorch.synapses.test import TestSynapse
 
 __all__ = [
     "IonotropicSynapse",
+    "KineticSynapse",
+    "SigmoidRateSynapse",
     "Synapse",
     "TanhConductanceSynapse",
     "TanhRateSynapse",

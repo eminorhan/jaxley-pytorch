@@ -117,3 +117,25 @@ def test_integrate_releases_data_stimuli_without_gc(SimpleCell):
             assert alive() is None
         finally:
             gc.enable()
+
+
+def test_gradient_through_data_stimulus(SimpleCell):
+    """Gradients with respect to a data stimulus, with and without checkpointing
+    (`integrate` splits stimuli that require gradients with `unbind`; port-specific)."""
+    cell = SimpleCell(1, 2)
+    cell.insert(HH())
+    cell.branch(0).loc(0.0).record("v")
+    generator = torch.Generator().manual_seed(0)
+    for checkpoint_lengths in [None, [3, 4]]:
+        current = (0.05 * torch.rand(12, generator=generator)).requires_grad_(True)
+
+        def simulate(current):
+            data_stimuli = cell.branch(0).loc(0.5).data_stimulate(current)
+            return jx.integrate(
+                cell,
+                data_stimuli=data_stimuli,
+                delta_t=0.025,
+                checkpoint_lengths=checkpoint_lengths,
+            )
+
+        assert torch.autograd.gradcheck(simulate, (current,))

@@ -22,8 +22,11 @@ from jaxley_pytorch.utils.cell_utils import (
 )
 from jaxley_pytorch.utils.misc_utils import concat_and_ignore_empty, cumsum_leading_zero
 from jaxley_pytorch.utils.solver_utils import dhs_group_comps_into_levels
-from jaxley_pytorch.utils.syn_utils import gather_synapes
+from jaxley_pytorch.utils.syn_utils import gather_synapes, regular_layout
 from jaxley_pytorch.utils.torch_utils import as_index, as_tensor_like
+
+# Voltage step (mV) of the finite difference that linearizes the synaptic currents.
+_CURRENT_SLOPE_DIFF = 1e-3
 
 
 class Network(Module):
@@ -290,7 +293,16 @@ class Network(Module):
         self._init_view()
 
     def _build_synapse_plan(self, device: torch.device) -> List[Dict]:
-        """Return the pre- and postsynaptic compartments of every synapse type."""
+        """Return the pre- and postsynaptic compartments of every synapse type.
+
+        For a synapse type whose synapses are ordered by postsynaptic compartment, with
+        the same number `k` of synapses per compartment, the plan also contains `k`, the
+        postsynaptic compartments (`targets`) and whether these are all nodes in order
+        (`targets_are_nodes`); such synapse types are stepped with
+        `_step_regular_synapses` (not part of Jaxley). On CUDA, the plan of a synapse
+        model with fused kernels (`jaxley_pytorch.kernels.synapse_step`) also contains
+        their index arrays.
+        """
         edges = self.edges
         if len(edges) == 0 or len(self.synapses) == 0:
             return []
@@ -298,6 +310,7 @@ class Network(Module):
         pre_syn_inds = grouped_syns["pre_index"].apply(list)
         post_syn_inds = grouped_syns["post_index"].apply(list)
         synapse_names = list(grouped_syns.indices.keys())
+        n_nodes = int(self._n_nodes)
 
         plans = []
         for i, synapse_type in enumerate(self.synapses):
@@ -306,14 +319,32 @@ class Network(Module):
             ), "Mixup in the ordering of synapses. Please create an issue on Github."
             pre = np.asarray(pre_syn_inds[synapse_names[i]]).astype(int)
             post = np.asarray(post_syn_inds[synapse_names[i]]).astype(int)
-            plans.append(
-                {
-                    "synapse": synapse_type,
-                    "pre": as_index(pre, device),
-                    "post": as_index(post, device),
-                    "state_names": list(synapse_type.synapse_states.keys()),
-                }
-            )
+            plan = {
+                "synapse": synapse_type,
+                "pre": as_index(pre, device),
+                "post": as_index(post, device),
+                "state_names": list(synapse_type.synapse_states.keys()),
+            }
+            layout = regular_layout(post)
+            if layout is not None:
+                k, targets = layout
+                # The presynaptic compartments as `(num_targets, k)`. Its sizes are static
+                # for `torch.compile`: if they were dynamic (after networks with other
+                # sizes were compiled), the reshape to `(..., num_targets, k)` would fail.
+                pre_per_target = plan["pre"].reshape(len(targets), k)
+                torch._dynamo.mark_static(pre_per_target, 0)
+                torch._dynamo.mark_static(pre_per_target, 1)
+                plan["k"] = k
+                plan["pre_per_target"] = pre_per_target
+                plan["targets"] = as_index(targets, device)
+                plan["targets_are_nodes"] = bool(
+                    len(targets) == n_nodes and np.array_equal(targets, np.arange(n_nodes))
+                )
+                if torch.device(device).type == "cuda":
+                    from jaxley_pytorch.kernels.synapse_step import kernel_plan
+
+                    plan.update(kernel_plan(synapse_type, pre, targets, n_nodes, device))
+            plans.append(plan)
         return plans
 
     def _step_synapse(
@@ -323,10 +354,128 @@ class Network(Module):
         plan: Dict,
         gathered: Dict,
     ) -> tuple[dict, tuple[Array, Array]]:
-        """Perform one step of the synapses and obtain their currents."""
-        states = self._step_synapse_state(states, delta_t, plan, gathered)
-        states, current_terms = self._synapse_currents(states, delta_t, plan, gathered)
-        return states, current_terms
+        """Perform one step of the synapses and obtain their currents.
+
+        Synapse types with a regular layout (see `_build_synapse_plan`) are stepped
+        with `_step_regular_synapses`, the others as in Jaxley.
+        """
+        pairs = list(zip(plan["synapses"], gathered["synapses"]))
+        regular = [(sp, gp) for sp, gp in pairs if "k" in sp]
+        if len(regular) < len(pairs):
+            others = [(sp, gp) for sp, gp in pairs if "k" not in sp]
+            other_plan = dict(plan, synapses=[sp for sp, _ in others])
+            other_gathered = dict(gathered, synapses=[gp for _, gp in others])
+            states = self._step_synapse_state(states, delta_t, other_plan, other_gathered)
+            states, (voltage_terms, constant_terms) = self._synapse_currents(
+                states, delta_t, other_plan, other_gathered
+            )
+        else:
+            voltage_terms = torch.zeros_like(states["v"])
+            constant_terms = torch.zeros_like(states["v"])
+        for sp, gp in regular:
+            states, (lin, const) = self._step_regular_synapses(states, delta_t, sp, gp)
+            voltage_terms = voltage_terms + lin
+            constant_terms = constant_terms + const
+        return states, (voltage_terms, constant_terms)
+
+    @staticmethod
+    def _step_regular_synapses(
+        states: Dict, delta_t: float, sp: Dict, gp: Dict
+    ) -> tuple[dict, tuple[Array, Array]]:
+        """`_step_synapse_state` and `_synapse_currents` for one synapse type whose
+        synapses are ordered by postsynaptic compartment, `k` per compartment (not part
+        of Jaxley; the same computation, only the sums are taken in a different order).
+
+        Every synapse quantity is viewed as `(..., num_targets, k)`. The postsynaptic
+        voltage is gathered once per target and broadcast over its synapses, and the
+        current terms are summed over the last dimension instead of being scattered
+        with `index_add` (which `torch.compile` turns into one atomic add per synapse,
+        the slowest part of the step). The state update and the currents are computed
+        together, and the currents at both voltages of the finite difference are
+        written out instead of stacked. Then `torch.compile` keeps only the synapse
+        states for the backward pass (and recomputes the rest), unless the current
+        through every synapse is stored (`gp["store_current"]`, set by `integrate`).
+
+        On CUDA, synapse models with fused kernels use those instead (inside `integrate`,
+        see `jaxley_pytorch.kernels.synapse_step`).
+        """
+        if "kernel_model" in sp:
+            from jaxley_pytorch.kernels.synapse_step import fused_step
+
+            result = fused_step(states, delta_t, sp, gp)
+            if result is not None:
+                return result
+        voltages = states["v"]
+        synapse_type = sp["synapse"]
+        num_targets, k = sp["pre_per_target"].shape
+        num_syn = num_targets * k
+
+        def per_target(x):
+            if isinstance(x, torch.Tensor) and x.dim() > 0 and x.shape[-1] == num_syn:
+                return x.reshape(*x.shape[:-1], num_targets, k)
+            return x
+
+        def per_synapse(x):
+            return x.reshape(*x.shape[:-2], num_syn)
+
+        pre_v = voltages[..., sp["pre_per_target"]]
+        if sp["targets_are_nodes"]:
+            post_v = voltages[..., None]
+        else:
+            post_v = voltages[..., sp["targets"]][..., None]
+        params = {key: per_target(val) for key, val in gp["params"].items()}
+        synapse_states = {s: per_target(states[s]) for s in sp["state_names"]}
+
+        # State updates.
+        states_updated = synapse_type.update_states(
+            synapse_states, delta_t, pre_v, post_v, params
+        )
+        for key, val in states_updated.items():
+            if key in states:
+                ref = states[key]
+                val = torch.broadcast_to(
+                    as_tensor_like(val, ref), (*ref.shape[:-1], num_targets, k)
+                )
+                states[key] = per_synapse(val)
+            elif isinstance(val, torch.Tensor) and val.shape[-2:] == (num_targets, k):
+                states[key] = per_synapse(val)
+            else:
+                states[key] = val
+            synapse_states[key] = val
+
+        # Slope and offset of the currents (as in `_synapse_currents`).
+        diff = _CURRENT_SLOPE_DIFF
+        currents = as_tensor_like(
+            synapse_type.compute_current(synapse_states, pre_v, post_v, params),
+            voltages,
+        )
+        perturbed = as_tensor_like(
+            synapse_type.compute_current(
+                synapse_states, pre_v + diff, post_v + diff, params
+            ),
+            voltages,
+        )
+        shape = torch.broadcast_shapes(
+            currents.shape, perturbed.shape, pre_v.shape, post_v.shape
+        )
+        currents = torch.broadcast_to(currents, shape)
+        area = per_target(gp["area_post"])
+        currents_dist = convert_point_process_to_distributed(currents, area)
+        perturbed_dist = convert_point_process_to_distributed(
+            torch.broadcast_to(perturbed, shape), area
+        )
+        voltage_term = (perturbed_dist - currents_dist) / diff
+        constant_term = currents_dist - voltage_term * post_v
+        if gp.get("store_current", True):  # See `integrate`.
+            states[f"i_{synapse_type._name}"] = per_synapse(currents)
+
+        # Sum over the synapses of every postsynaptic compartment.
+        voltage_term, constant_term = voltage_term.sum(-1), constant_term.sum(-1)
+        if not sp["targets_are_nodes"]:
+            voltage_term, constant_term = gather_synapes(
+                voltages.shape[-1], sp["targets"], voltage_term, constant_term
+            )
+        return states, (voltage_term, -constant_term)
 
     def _step_synapse_state(
         self,
@@ -372,7 +521,7 @@ class Network(Module):
         syn_constant_terms = torch.zeros_like(voltages)
         # Run with two different voltages that are `diff` apart to infer the slope and
         # offset.
-        diff = 1e-3
+        diff = _CURRENT_SLOPE_DIFF
         for sp, gp in zip(plan["synapses"], gathered["synapses"]):
             synapse_type = sp["synapse"]
             synapse_states = {s: states[s] for s in sp["state_names"]}

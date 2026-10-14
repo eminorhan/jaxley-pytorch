@@ -11,10 +11,10 @@ Neuron models (`MODELS`):
 
 * `rate`: one passive compartment (leak, 10 ms membrane time constant) per neuron, and
   current-based synapses whose presynaptic "rate" is a sigmoid of the presynaptic
-  voltage (`SigmoidRateSynapse`, below). Jaxley's `TanhRateSynapse` uses tanh, whose
-  output is negative below its offset, so an excitatory weight would then inhibit;
-  the sigmoid keeps rates non-negative so that the weight's sign alone fixes the
-  synapse's sign (Dale's law).
+  voltage (`jaxley_pytorch.synapses.SigmoidRateSynapse`). Jaxley's `TanhRateSynapse`
+  uses tanh, whose output is negative below its offset, so an excitatory weight would
+  then inhibit; the sigmoid keeps rates non-negative so that the weight's sign alone
+  fixes the synapse's sign (Dale's law).
 * `hh`: one Hodgkin-Huxley compartment per neuron (`jx.channels.HH`, default
   parameters).
 * `pospischil`: one compartment per neuron with the cortical channels of Pospischil et
@@ -25,12 +25,14 @@ Neuron models (`MODELS`):
   soma to the apical compartment, the input current enters the basal compartment, the
   readout uses the soma.
 
-The spiking models use conductance-based first-order kinetic synapses (`KineticSynapse`,
-below) with reversal potentials of 0 mV (excitatory) and -80 mV (inhibitory), a rise
-rate of 1/ms and decay time constants of 5 ms and 10 ms; transmitter is released when
-the presynaptic voltage exceeds -20 mV (slope 2 mV), i.e. by spikes. (Unlike Jaxley's
-`IonotropicSynapse`, whose rise rate grows without bound with the presynaptic voltage,
-the rise rate is bounded.)
+The spiking models use conductance-based first-order kinetic synapses
+(`jaxley_pytorch.synapses.KineticSynapse`) with reversal potentials of 0 mV
+(excitatory) and -80 mV (inhibitory), a rise rate of 1/ms and decay time constants of
+5 ms and 10 ms; transmitter is released when the presynaptic voltage exceeds -20 mV
+(slope 2 mV), i.e. by spikes. (Unlike Jaxley's `IonotropicSynapse`, whose rise rate
+grows without bound with the presynaptic voltage, the rise rate is bounded.) On CUDA,
+both synapse models are simulated with fused kernels (`jaxley_pytorch.kernels.
+synapse_step`), as the synapses are ordered by postsynaptic neuron.
 
 Point neurons are cylinders of 10 um radius and 20 um length (1,257 um^2). Input
 currents and synaptic weights are specified as densities (uA/cm^2, mS/cm^2) and
@@ -48,7 +50,7 @@ from torch.utils.checkpoint import checkpoint
 
 import jaxley_pytorch as jx
 from jaxley_pytorch.channels import HH, K, Km, Leak, Na
-from jaxley_pytorch.synapses.synapse import Synapse
+from jaxley_pytorch.synapses import KineticSynapse, SigmoidRateSynapse
 
 MODELS = ("gru", "rate", "hh", "pospischil", "l5pc")
 RADIUS, LENGTH = 10.0, 20.0  # um, point neurons.
@@ -67,69 +69,6 @@ DEFAULTS = {
     "pospischil": dict(dt=0.025, input_scale=2.0, w_exc=0.01, w_inh=0.05, v_center=-60.0, v_scale=20.0),
     "l5pc": dict(dt=0.025, input_scale=20.0, w_exc=0.05, w_inh=0.25, v_center=-60.0, v_scale=20.0),
 }
-
-
-class SigmoidRateSynapse(Synapse):
-    """Current-based rate synapse: `current = -gS * sigmoid((v_pre - x_offset) * slope)`.
-
-    The presynaptic rate is non-negative, so the sign of `gS` alone sets the sign of
-    the synapse: `gS > 0` depolarizes (excitatory), `gS < 0` hyperpolarizes. Like
-    `TanhRateSynapse`, `gS` is a current (nA), it has no state.
-    """
-
-    def __init__(self, name: Optional[str] = None):
-        super().__init__(name)
-        prefix = self._name
-        self.synapse_params = {
-            f"{prefix}_gS": 1e-4,
-            f"{prefix}_x_offset": -60.0,
-            f"{prefix}_slope": 0.25,
-        }
-        self.synapse_states = {}
-
-    def update_states(self, states, delta_t, pre_voltage, post_voltage, params):
-        return {}
-
-    def compute_current(self, states, pre_voltage, post_voltage, params):
-        prefix = self._name
-        rate = torch.sigmoid((pre_voltage - params[f"{prefix}_x_offset"]) * params[f"{prefix}_slope"])
-        return -params[f"{prefix}_gS"] * rate
-
-
-class KineticSynapse(Synapse):
-    """First-order kinetic synapse (Destexhe, Mainen & Sejnowski, 1994).
-
-    `ds/dt = alpha * T(v_pre) * (1 - s) - beta * s` with the transmitter
-    `T(v) = sigmoid((v - v_th) / delta)`, solved with exponential Euler, and
-    `current = gS * s * (v_post - e_syn)` (nA for gS in uS). The time constant,
-    `1 / (alpha * T + beta)`, stays bounded however steep the release is.
-    """
-
-    def __init__(self, name: Optional[str] = None):
-        super().__init__(name)
-        prefix = self._name
-        self.synapse_params = {
-            f"{prefix}_gS": 1e-4,  # uS
-            f"{prefix}_e_syn": 0.0,  # mV
-            f"{prefix}_alpha": 1.0,  # 1/ms
-            f"{prefix}_beta": 0.2,  # 1/ms
-            f"{prefix}_v_th": -20.0,  # mV
-            f"{prefix}_delta": 2.0,  # mV
-        }
-        self.synapse_states = {f"{prefix}_s": 0.0}
-
-    def update_states(self, states, delta_t, pre_voltage, post_voltage, params):
-        prefix = self._name
-        transmitter = torch.sigmoid((pre_voltage - params[f"{prefix}_v_th"]) / params[f"{prefix}_delta"])
-        a = params[f"{prefix}_alpha"] * transmitter
-        rate = a + params[f"{prefix}_beta"]
-        s_inf = a / rate
-        s = states[f"{prefix}_s"]
-        return {f"{prefix}_s": s_inf + (s - s_inf) * torch.exp(-delta_t * rate)}
-
-    def compute_current(self, states, pre_voltage, post_voltage, params):
-        prefix = self._name
-        return params[f"{prefix}_gS"] * states[f"{prefix}_s"] * (post_voltage - params[f"{prefix}_e_syn"])
 
 
 def _point_cell(channels) -> jx.Cell:
@@ -194,7 +133,9 @@ def _area_cm2(net: jx.Network, node_inds: np.ndarray) -> np.ndarray:
 
 
 def sample_connectivity(n: int, exc_frac: float, k_in: int, rng: np.random.Generator):
-    """Fixed in-degree E/I connectivity without autapses. Returns (pre, post) cells."""
+    """Fixed in-degree E/I connectivity without autapses. Returns (pre, post) cells,
+    ordered by postsynaptic cell (excitatory inputs first): the layout for which
+    jaxley_pytorch sums the synaptic currents without atomic adds."""
     n_exc = int(round(exc_frac * n))
     k_exc = int(round(exc_frac * k_in))
     k_inh = k_in - k_exc
@@ -209,7 +150,9 @@ def sample_connectivity(n: int, exc_frac: float, k_in: int, rng: np.random.Gener
             cand = cand[cand != j][:k]
             pre.append(cand)
             post.append(np.full(len(cand), j))
-    return np.concatenate(pre), np.concatenate(post), n_exc
+    pre, post = np.concatenate(pre), np.concatenate(post)
+    order = np.argsort(post, kind="stable")
+    return pre[order], post[order], n_exc
 
 
 class BiophysNet:

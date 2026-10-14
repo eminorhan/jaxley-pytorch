@@ -593,6 +593,22 @@ def integrate(
         init_states = module._append_currents_with_plan(
             init_states, delta_t, plan, gathered
         )
+    # The current through every synapse of a regular layout (see
+    # `Network._step_regular_synapses`) is only computed if it is recorded (not part of
+    # Jaxley): as an output of the step, it makes `torch.compile` keep one more tensor
+    # of the size of all synapses per step for the backward pass.
+    recorded = set(module.base.recordings["state"])
+    for sp, gp in zip(plan["synapses"], gathered["synapses"]):
+        if "k" in sp:
+            name = f"i_{sp['synapse']._name}"
+            gp["store_current"] = name in recorded
+            if not gp["store_current"]:
+                init_states.pop(name, None)
+        if "kernel_model" in sp:  # The fused synapse kernels (not part of Jaxley).
+            from jaxley_pytorch.kernels.synapse_step import kernel_scalars
+            from jaxley_pytorch.modules.network import _CURRENT_SLOPE_DIFF
+
+            gp["kernel_scalars"] = kernel_scalars(delta_t, _CURRENT_SLOPE_DIFF, dtype, device)
     external_inds = {k: as_index(v, device) for k, v in external_inds.items()}
     if "i" in externals:
         gathered["area_stim"] = all_params["area"][..., external_inds["i"]]
@@ -619,8 +635,17 @@ def integrate(
         )
         return state, record(state)
 
+    # Inputs that require gradients are split into the views of every time step (not
+    # part of Jaxley). The backward pass of `val[t]` would create a zero tensor of the
+    # size of all time steps at every step and add it up (quadratic in the number of
+    # steps); that of `unbind` stacks the gradients of all steps once.
+    externals_by_step = {
+        key: torch.unbind(val, 0) if torch.is_grad_enabled() and val.requires_grad else val
+        for key, val in externals.items()
+    }
+
     def _externals_at(t):
-        return {key: val[t] for key, val in externals.items()}
+        return {key: val[t] for key, val in externals_by_step.items()}
 
     # Record the initial state.
     init_recording = record(init_states)

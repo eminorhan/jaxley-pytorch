@@ -65,6 +65,21 @@ paper's examples need are implemented in `jaxley_pytorch.mech` (`l5pc`, `fohlmei
   of `IonotropicSynapse` without the cancellation in `1 - s_inf` (which made its gradient
   NaN once a steep release saturates). The float64 results are unchanged (to
   round-off); `tests/test_float32_safety.py`.
+* **Synapses ordered by postsynaptic compartment.** For a synapse type whose synapses
+  are ordered by postsynaptic compartment, with the same number of synapses per
+  compartment (e.g. a network with a fixed in-degree, built one postsynaptic cell after
+  the other), the currents of every compartment's synapses are summed
+  (`Network._step_regular_synapses`) instead of added up with `index_add`, which
+  `torch.compile` turns into one atomic add per synapse. On CUDA, the two synapse
+  models added by the port, `KineticSynapse` (first-order kinetics) and
+  `SigmoidRateSynapse` (a current-based rate synapse), are then simulated with fused
+  Triton kernels (`jaxley_pytorch/kernels/synapse_step.py`; one kernel per pass, no
+  atomic adds). The results are the same up to round-off
+  (`tests/test_regular_synapses.py`, `tests/test_synapse_kernels.py`); together, the
+  networks of `examples/language_modeling` train 1.7-4.5x faster with 2.6-8x less
+  memory. For such synapses, `jx.integrate` computes the current through every
+  synapse (`i_<synapse>`) only if it is recorded, so the states returned with
+  `return_states=True` do not contain it otherwise.
 * **Renamed:** `module.to_jax()` is `module.to_torch()`, `.jaxnodes` / `.jaxedges` are
   `.torchnodes` / `.torchedges`. `TypeOptimizer` wraps `torch.optim` optimizers
   (`step()` / `zero_grad()`) instead of `optax`.
