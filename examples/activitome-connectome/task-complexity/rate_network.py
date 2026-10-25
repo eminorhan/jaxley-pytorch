@@ -90,14 +90,21 @@ def max_real_eigenvalue(w: np.ndarray, g: np.ndarray, b: np.ndarray, rng: np.ran
     return float(np.max(np.linalg.eigvals(w * (g * slope)[None, :]).real))
 
 
-def paper_init(n: int, rng: np.random.Generator, exc_frac: float = 0.7, p: float = 0.5):
-    """Gains, biases, connection mask (post, pre) and weights of the paper's Fig. 1 teacher
-    before training; connectivity redrawn until `max_real_eigenvalue` <= 1."""
-    n_exc = int(exc_frac * n)
+def random_gains_biases(n: int, rng: np.random.Generator):
+    """The paper's initial gains and biases of a teacher: gains ~ normal(1, 0.4), redrawn
+    until positive; biases ~ uniform(-0.1, 0.1)."""
     g = 0.4 * rng.standard_normal(n) + 1.0
     while np.any(g < 0):
         g[g < 0] = 0.4 * rng.standard_normal(int(np.sum(g < 0))) + 1.0
     b = 0.1 * (2 * rng.random(n) - 1.0)
+    return g, b
+
+
+def paper_init(n: int, rng: np.random.Generator, exc_frac: float = 0.7, p: float = 0.5):
+    """Gains, biases, connection mask (post, pre) and weights of the paper's Fig. 1 teacher
+    before training; connectivity redrawn until `max_real_eigenvalue` <= 1."""
+    n_exc = int(exc_frac * n)
+    g, b = random_gains_biases(n, rng)
     for _ in range(100):
         mask = rng.random((n, n)) < p
         w = (2.4 / np.sqrt(n) * rng.standard_normal((n, n)) + 1.0 / n) * mask

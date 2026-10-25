@@ -43,12 +43,13 @@ import rate_network as rn
 import tasks
 
 LN2 = math.log(2.0)
-# Cycling: the paper's recipes (teacher 3,000 steps instead of its 1,400). Text teachers:
-# the recipe of examples/language_modeling. Text students: the paper's student recipe.
+# Cycling: the paper's recipes (teacher 3,000 steps instead of its 1,400; students 15,000
+# instead of 7,000, after which they were still learning the task). Text teachers: the
+# recipe of examples/language_modeling. Text students: the paper's student recipe.
 # Text steps are 32 x 256 tokens: teachers see 205M tokens, students 82M.
 RECIPES = {
     ("cycling", "teacher"): dict(steps=3000, lr=1e-3, clip=5.0, clip_mode="global", eval_every=100, log_every=50),
-    ("cycling", "student"): dict(steps=7000, lr=1e-3, clip=2.0, clip_mode="global", eval_every=50, log_every=50),
+    ("cycling", "student"): dict(steps=15_000, lr=1e-3, clip=2.0, clip_mode="global", eval_every=50, log_every=50),
     ("text", "teacher"): dict(steps=25_000, lr=3e-3, clip=1.0, clip_mode="per-param", eval_every=1000, log_every=100),
     ("text", "student"): dict(steps=10_000, lr=1e-3, clip=2.0, clip_mode="global", eval_every=250, log_every=50),
 }
@@ -63,7 +64,7 @@ def lr_factor(recipe):
     """The learning rate of step s (from 0) is `lr * factor(s)`: linear warmup, then
     linear decay to zero at the last step."""
     n = recipe["steps"]
-    w = max(1, int(round(recipe["warmup"] * n)))
+    w = recipe.get("warmup_steps") or max(1, int(round(recipe["warmup"] * n)))
 
     def factor(s):
         return (s + 1) / w if s < w else max(0.0, (n - s) / (n - w))
@@ -127,21 +128,31 @@ def load_teacher(run_dir, device, dtype, compile):
     return rn.RateRNN(sim, st["W"], st["g"], st["b"], io, trainable=()), conn, ck
 
 
-def make_student(teacher, conn, seed, init="shuffled"):
+def make_student(teacher, conn, seed, init="shuffled", gain_scale=1.0, init_from=None):
     """A student with the teacher's weights, inputs and readout. Gains and biases:
     `shuffled`, the paper's student initialisation (the teacher's, each permuted within
-    the excitatory and within the inhibitory neurons, gains halved); `teacher`, the
-    teacher's own."""
+    the excitatory and within the inhibitory neurons, gains halved); `random`, new draws
+    from the teacher's initial distribution (`rate_network.random_gains_biases`);
+    `uniform`, all gains 1 and all biases 0; `teacher`, the teacher's own. `init_from`
+    (a student's run directory) takes that student's gains and biases instead. The gains
+    are then multiplied by `gain_scale`."""
     g = teacher.g.detach().cpu().double().numpy().copy()
     b = teacher.b.detach().cpu().double().numpy().copy()
-    if init == "shuffled":
-        rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(seed)
+    if init_from is not None:
+        st = torch.load(os.path.join(init_from, "student.pt"), map_location="cpu", weights_only=True)
+        g, b = st["g"].double().numpy(), st["b"].double().numpy()
+    elif init == "shuffled":
         for part in (slice(0, conn["n_exc"]), slice(conn["n_exc"], None)):
             g[part] = rng.permutation(g[part])
             b[part] = rng.permutation(b[part])
         g = 0.5 * g
+    elif init == "random":
+        g, b = rn.random_gains_biases(len(g), rng)
+    elif init == "uniform":
+        g, b = np.ones(len(g)), np.zeros(len(b))
     io = {k: v.detach() for k, v in teacher.io.items()}
-    return rn.RateRNN(teacher.sim, teacher.W.detach(), g, b, io, trainable={"g", "b"})
+    return rn.RateRNN(teacher.sim, teacher.W.detach(), gain_scale * g, b, io, trainable={"g", "b"})
 
 
 # ----------------------------------------------------------------------------------
@@ -154,7 +165,7 @@ def eval_cycling(model, teacher, inputs, batch):
     the trials `inputs`, in batches of `batch` (the last one padded)."""
     n_trials = inputs.shape[0]
     pad = (-n_trials) % batch
-    inp = torch.cat([inputs, inputs[:pad]]) if pad else inputs
+    inp = torch.cat([inputs, inputs[torch.arange(pad, device=inputs.device) % n_trials]]) if pad else inputs
     out = {}
     for name, net in (("s", model), ("t", teacher)):
         if net is None:
@@ -327,6 +338,44 @@ def fit(args, recipe, scheduler, params, iteration, load_batch, evaluate, log, o
             break
 
 
+def lbfgs_finish(args, student, inputs, targets, batch, evaluate, log, out_path):
+    """`--lbfgs-steps` steps of full-batch L-BFGS (strong-Wolfe line search) on the
+    student's gains and biases, with the task loss on all the trials `inputs` (cycling),
+    after the Adam phase. Evaluations are marked `"phase": "lbfgs"`."""
+    params = [student.g, student.b]
+    n = inputs.shape[0]
+    pad = (-n) % batch
+    extra = torch.arange(pad, device=inputs.device) % n
+    inp = torch.cat([inputs, inputs[extra]]) if pad else inputs
+    tg = torch.cat([targets, targets[extra]]) if pad else targets
+    weight = torch.cat([torch.ones(n), torch.zeros(pad)]).to(inputs.device)
+    # No stopping tolerances: always the requested number of steps (the gradient norm is logged).
+    opt = torch.optim.LBFGS(params, lr=1.0, max_iter=1, history_size=50, line_search_fn="strong_wolfe",
+                            tolerance_grad=0.0, tolerance_change=0.0)
+
+    def closure():
+        opt.zero_grad()
+        total = torch.zeros((), device=inputs.device)
+        for i in range(0, len(inp), batch):
+            z, _, _ = student.run_trials(inp[i : i + batch], student.sim.rest_states(batch))
+            loss = (((z - tg[i : i + batch]) ** 2).mean(-1) * weight[i : i + batch]).sum() / n
+            loss.backward()
+            total = total + loss.detach()
+        return total
+
+    first = log["evals"][-1]["step"]
+    for it in range(args.lbfgs_steps):
+        loss = float(opt.step(closure))
+        if not math.isfinite(loss):
+            raise FloatingPointError(f"non-finite loss at L-BFGS step {it + 1}")
+        if (it + 1) % args.lbfgs_eval_every == 0 or it == args.lbfgs_steps - 1:
+            grad_norm = float(torch.cat([p.grad.flatten() for p in params]).norm())
+            log["evals"].append(dict(evaluate(first + it + 1), phase="lbfgs", grad_norm=grad_norm))
+            print(json.dumps(log["evals"][-1]), flush=True)
+            with open(out_path, "w") as f:
+                json.dump(log, f, indent=1)
+
+
 def on_side_stream(fn):
     """Run `fn()` on a side stream (everything that touches the parameters before the
     graph capture, as in examples/language_modeling/train.py)."""
@@ -461,21 +510,42 @@ def run_student(args, device, dtype):
     B = args.batch
     teacher, conn, ck = load_teacher(args.teacher, device, dtype, bool(args.compile))
     assert ck["task"] == args.task, (ck["task"], args.task)
-    student = make_student(teacher, conn, args.seed, args.init)
+    student = make_student(teacher, conn, args.seed, args.init, init_from=args.init_from)
     basis = teacher.readout_basis()
+    start = {}
     if args.task == "cycling":
         inputs, targets = (torch.as_tensor(x, device=device, dtype=dtype) for x in tasks.cycling_trials())
         ev_t = eval_cycling(teacher, None, inputs, B)
         z_t, a_t = ev_t["z_s"], ev_t["a_s"]
         teacher_loss = float(((z_t - targets) ** 2).mean())
+        if args.stable_start:
+            # A start runs away if its task loss exceeds 10x that of a silent readout:
+            # draw again (uniform: scale the gains down by 0.9).
+            silent, attempt = float((targets**2).mean()), 0
+            while True:
+                start_loss = float(((eval_cycling(student, None, inputs, B)["z_s"] - targets) ** 2).mean())
+                if math.isfinite(start_loss) and start_loss < 10 * silent:
+                    break
+                attempt += 1
+                if attempt > 50:
+                    raise RuntimeError("no stable start in 50 attempts")
+                student = make_student(teacher, conn, args.seed + 1000 * attempt, args.init,
+                                       gain_scale=0.9**attempt if args.init == "uniform" else 1.0)
+            start = {"redraws": attempt, "start_loss": start_loss}
+            print(json.dumps({"start": start}), flush=True)
+        if args.fresh_trials:  # new trials of the same task (another seed) instead of the 60
+            pool_in, pool_tg = (torch.as_tensor(x, device=device, dtype=dtype)
+                                for x in tasks.cycling_trials(seed=10_000 + args.seed, trials=args.fresh_trials))
+        else:
+            pool_in, pool_tg = inputs, targets
         static_in = torch.zeros(B, tasks.TRIAL_STEPS, 2, device=device)
         static_tg = torch.zeros(B, tasks.TRIAL_STEPS, device=device)
         rng = np.random.default_rng(args.seed + 1)
 
         def load_batch():
-            idx = torch.as_tensor(rng.choice(tasks.TRIALS, B, replace=False), device=device)
-            static_in.copy_(inputs[idx])
-            static_tg.copy_(targets[idx])
+            idx = torch.as_tensor(rng.choice(len(pool_in), B, replace=False), device=device)
+            static_in.copy_(pool_in[idx])
+            static_tg.copy_(pool_tg[idx])
 
         def forward_loss():
             z, _, _ = student.run_trials(static_in, student.sim.rest_states(B))
@@ -527,19 +597,28 @@ def run_student(args, device, dtype):
         return loss.detach()
 
     log = run_info(args, recipe, student, device)
+    log["start"] = start
     log["teacher"] = {"dir": args.teacher, **activity_stats(a_t, basis)}
     log["baselines"] = baselines(a_t, teacher, basis)
     print(json.dumps({"teacher": log["teacher"], "baselines": log["baselines"]}), flush=True)
-    fit(args, recipe, scheduler, params, iteration, load_batch, evaluate, log, os.path.join(args.out, "result.json"))
-    torch.save({"g": student.g.detach().cpu(), "b": student.b.detach().cpu(), "seed": args.seed, "init": args.init},
-               os.path.join(args.out, "student.pt"))
+    out_path = os.path.join(args.out, "result.json")
+    fit(args, recipe, scheduler, params, iteration, load_batch, evaluate, log, out_path)
+
+    def save():
+        torch.save({"g": student.g.detach().cpu(), "b": student.b.detach().cpu(), "seed": args.seed,
+                    "init": args.init}, os.path.join(args.out, "student.pt"))
+
+    save()
+    if args.lbfgs_steps:
+        lbfgs_finish(args, student, inputs, targets, B, evaluate, log, out_path)
+        save()
     log["final"] = log["evals"][-1]
     return log
 
 
 def recipe_of(args):
     recipe = dict(RECIPES[(kind(args.task), args.role)], warmup=WARMUP)
-    for key in ["steps", "lr", "eval_every", "log_every"]:
+    for key in ["steps", "lr", "eval_every", "log_every", "warmup_steps"]:
         if getattr(args, key) is not None:
             recipe[key] = getattr(args, key)
     return recipe
@@ -560,8 +639,17 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--teacher", default=None, help="the teacher's run directory (--role student)")
     parser.add_argument("--seed", type=int, default=0, help="teacher: network; student: initialisation and text")
-    parser.add_argument("--init", choices=["shuffled", "teacher"], default="shuffled",
+    parser.add_argument("--init", choices=["shuffled", "random", "uniform", "teacher"], default="shuffled",
                         help="student: initial gains and biases (see make_student)")
+    parser.add_argument("--init-from", default=None, help="student: start from this student's gains and biases")
+    parser.add_argument("--stable-start", type=int, default=0,
+                        help="student, cycling: draw the start again (uniform: scale its gains by 0.9) while its "
+                             "activity runs away")
+    parser.add_argument("--fresh-trials", type=int, default=0,
+                        help="student, cycling: train on this many new trials of the task instead of the 60")
+    parser.add_argument("--lbfgs-steps", type=int, default=0,
+                        help="student, cycling: then this many full-batch L-BFGS steps on the 60 trials")
+    parser.add_argument("--lbfgs-eval-every", type=int, default=25)
     parser.add_argument("--data", default=None, help="token files (default per task, tasks.DATA)")
     parser.add_argument("--n", type=int, default=300)
     parser.add_argument("--width", type=int, default=75, help="text: width of the input and readout maps")
@@ -574,6 +662,7 @@ def main():
     parser.add_argument("--lr", type=float, default=None, help="override the recipe")
     parser.add_argument("--eval-every", type=int, default=None, help="override the recipe")
     parser.add_argument("--log-every", type=int, default=None, help="override the recipe")
+    parser.add_argument("--warmup-steps", type=int, default=None, help="override the warmup (5%% of the steps)")
     parser.add_argument("--hours", type=float, default=None, help="stop after this long")
     parser.add_argument("--dtype", choices=["float32", "float64"], default="float32")
     parser.add_argument("--compile", type=int, default=1)
@@ -584,6 +673,8 @@ def main():
         parser.error("--task is required")
     if args.role == "student" and args.teacher is None:
         parser.error("--teacher is required")
+    if (args.stable_start or args.fresh_trials or args.lbfgs_steps) and args.task != "cycling":
+        parser.error("--stable-start, --fresh-trials and --lbfgs-steps are for the cycling task")
     if args.task in ("chars", "tokens") and args.eval_segments % args.batch:
         parser.error("--eval-segments must be a multiple of --batch")
     os.makedirs(args.out, exist_ok=True)
