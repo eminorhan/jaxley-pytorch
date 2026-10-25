@@ -17,8 +17,7 @@ cell.record("v")
 v = jx.integrate(cell)  # torch.Tensor of shape (num_recordings, num_timesteps)
 ```
 
-The ion channels of [jaxley-mech](https://github.com/jaxleyverse/jaxley-mech) that the
-paper's examples need are implemented in `jaxley_pytorch.mech` (`l5pc`, `fohlmeister97`).
+The ion channels of [jaxley-mech](https://github.com/jaxleyverse/jaxley-mech) are implemented in `jaxley_pytorch.mech` (`l5pc`, `fohlmeister97`).
 
 ## Differences from Jaxley
 
