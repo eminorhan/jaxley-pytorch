@@ -13,14 +13,15 @@ next-token prediction on TinyStories, at the level of characters and of BPE toke
 
 The paper's Fig. 1 protocol, with the student trained on the task itself:
 
-* **Network** (`rate_network.py`): the paper's rate network in jaxley_pytorch. 300
-  neurons (70% excitatory), each a passive compartment (time constant tau = 10 ms) whose
-  rate is `relu(g) * softplus(x + b)`, current-based softplus synapses, every ordered pair
-  connected with probability 0.5, Dale's law, the paper's initialisation and stability
-  test. Forward Euler with dt = 0.5 ms is exactly the update of the paper's code
-  (alpha = 0.05); `train.py --role check` verifies this against a direct implementation
-  of that update (rates and gradients agree to 1e-15 in float64).
-* **Tasks** (`tasks.py`):
+* **Network** (`jaxley_pytorch.training.rate_network`, `[model] name = "blk_rate"`): the
+  paper's rate network in jaxley_pytorch. 300 neurons (70% excitatory), each a passive
+  compartment (time constant tau = 10 ms) whose rate is `relu(g) * softplus(x + b)`,
+  current-based softplus synapses, every ordered pair connected with probability 0.5,
+  Dale's law, the paper's initialisation and stability test. Forward Euler with
+  dt = 0.5 ms is exactly the update of the paper's code (alpha = 0.05);
+  `tests/training/test_rate_network.py` checks this against a direct implementation of
+  that update (rates and gradients agree to 1e-15 in float64).
+* **Tasks** (`jaxley_pytorch.training.tasks`):
   * `cycling`: the paper's task (60 fixed trials of 20 tau; a pulse on one of two inputs
     starts an oscillation of 2 or 5 periods in the one-dimensional readout).
   * `chars`: TinyStories at the level of characters, the files of
@@ -35,7 +36,7 @@ The paper's Fig. 1 protocol, with the student trained on the task itself:
   (`a`: the rates averaged over the token's window), with 75-wide `embed` and
   `read_proj`. For characters this is no restriction (75 symbols); it makes the two text
   tasks differ only in their vocabulary.
-* **Teachers** (`train.py --role teacher`): recurrent weights, gains, biases and the
+* **Teachers** (`configs/<task>_teacher.toml`): recurrent weights, gains, biases and the
   readout trained together (and, for text, the input map); the cycling task's input
   weights stay random, as in the paper. Cycling: the paper's recipe (Adam 1e-3, batches
   of 32 of the 60 trials), 3,000 steps instead of 1,400. Text: 32 streams through the
@@ -43,17 +44,18 @@ The paper's Fig. 1 protocol, with the student trained on the task itself:
   from window to window), Adam 3e-3 with every tensor's gradient clipped at 1 (as in
   `examples/language_modeling`), 25,000 steps (205M tokens). An average story is 803
   characters or 202 BPE tokens.
-* **Students** (`train.py --role student`, ten per task): the teacher's weights, inputs,
+* **Students** (`configs/<task>_students.toml`, ten per task): the teacher's weights, inputs,
   readout and initial state; gains and biases initialised as in the paper's code (the
   teacher's, permuted within the excitatory and within the inhibitory neurons, gains
   halved), and only these trained (Adam 1e-3, gradient norm clipped at 2) on the task
   itself: the cycling task's target (mean squared error, 15,000 steps: after the paper's
   7,000 they were still learning the task) or the next token of the text (cross-entropy,
   10,000 steps of 32 x 256 tokens). The teacher's outputs are not used. One **control
-  student** per task starts from the teacher's own gains and biases: how far training
-  alone moves a student away from the teacher sets the floor of the activity error. For
-  the cycling task, ten more students start from new random gains and biases, drawn like
-  the teacher's initial ones (`--init random`; `runs/cycling/student_random_seed<k>`).
+  student** per task (`configs/<task>_control.toml`) starts from the teacher's own gains
+  and biases: how far training alone moves a student away from the teacher sets the floor
+  of the activity error. For the cycling task, ten more students start from new random
+  gains and biases, drawn like the teacher's initial ones
+  (`configs/cycling_students_random.toml`).
 * **Learning rate**, every run: linear warmup over the first 5% of the steps, then linear
   decay to zero (`torch.optim.lr_scheduler.LambdaLR`), so that teachers and students end
   at an optimum of their loss.
@@ -94,15 +96,30 @@ twice the teacher's (cycling).
 
 ## Running
 
-Outputs go to `/nrs/scicompsoft/orhane/probes/jaxley_pytorch/activitome-connectome/task-complexity`
-(`data/`, `runs/<task>/{teacher,student_seed<k>,student_control}/`, `jobs/`, `figures/`;
-smoke runs under `runs/smoke/` and `jobs/smoke/`). Jobs run on a snapshot of the repo
-(`probes/jaxley_pytorch/tools/snapshot.sh`) with `~/myvenv`.
+Every arm is one config file in `configs/` with all its settings, run by
+`python -m jaxley_pytorch.training --config configs/<arm>.toml --output-root <dir> [--seed k]`
+(`jaxley_pytorch/training/`; `--smoke` makes a 20-step check of a config). Outputs go to
+`/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity`
+(`data/`, `runs/<experiment_name>/seed<k>/`, `jobs/`, `figures/`, `probes/`). Jobs run on a
+snapshot of the repo (`probes/jaxley_pytorch/tools/snapshot.sh`) with `~/myvenv`.
 
 ```bash
-bash submit_smoke.sh  # BPE token files (CPU job), then smoke.sh on one H100
-bash submit.sh        # 3 teachers, 3 x 10 students + 3 controls (each after its teacher), summary
+bash submit.sh         # 3 teachers; then per task 10 students and a control, and the cycling task's random-start students
+bash submit_stress.sh  # the stress test (after submit.sh)
 ```
+
+The BPE token files come from `prepare_tokens.py` (one CPU job, 2 min:
+`python prepare_tokens.py --parquet <tinystories_gpt4_clean.parquet> --vocab 4096 --out $EXP/data/bpe4096`).
+
+**The runs in `runs/` were made before `jaxley_pytorch.training` existed**, by this
+folder's `train.py`, `rate_network.py` and `tasks.py` of commit 7e3a809, and were moved
+into the configs' layout on 2026-10-25 (`runs/relayout_20261025.tsv` lists every old and
+new name). Their directories hold those scripts' `result.json` and `teacher.pt` or
+`student.pt`, but no `config.toml`: `configs/` holds their settings. The library
+reproduces them exactly: for a few steps of the teacher and of students of every kind of
+all three tasks, in float64 on the CPU, it gives the same training losses, evaluations
+and parameters as those scripts, to the last bit (`probes/jaxley_pytorch/training_parity/`
+on /nrs). (`runs/smoke/` holds the smoke runs of those scripts.)
 
 `summarize.py` writes `summary.md` (tables), `training_curves.png` (Fig. 1c-e for every
 task) and `outcomes.png` (every student's final task loss against its final activity
@@ -118,16 +135,16 @@ Can any training strategy that uses only what a student may know (the connectome
 task, generic priors; never the teacher's activity or its trained gains and biases) reach
 both the teacher's task loss and the teacher's activity? Target: task loss at most twice
 the teacher's and activity error at most 0.1 of the shuffled baseline (the control
-reaches 0.002). Ten students per strategy (`submit_stress.sh`; `stress_test.py` writes
-`stress_test.md` and `stress_test.png`):
+reaches 0.002). Ten students per strategy (`submit_stress.sh`; runs in
+`runs/<config>/seed<k>`; `stress_test.py` writes `stress_test.md` and `stress_test.png`):
 
-| strategy | flags | runs |
-|---|---|---|
-| random start, drawn again while its activity runs away; then 500 full-batch L-BFGS steps | `--init random --stable-start 1 --lbfgs-steps 500` | `student_rstable_seed<k>` |
-| uniform start (gains 1, biases 0; gains scaled by 0.9 while the activity runs away); then L-BFGS | `--init uniform --stable-start 1 --lbfgs-steps 500` | `student_uniform_seed<k>` |
-| random start, stable draws, trained on 6,400 new trials of the task instead of the 60 | `--init random --stable-start 1 --fresh-trials 6400` | `student_rstable_fresh_seed<k>` |
-| the shuffled-start students, continued with 500 L-BFGS steps | `--init-from <student> --steps 0 --lbfgs-steps 500` | `student_shuffled_lbfgs_seed<k>` |
-| the 6,400-trials strategy, longer: 30,000 steps, batch 128, 1,000 warmup steps | `--init random --stable-start 1 --fresh-trials 6400 --steps 30000 --batch 128 --warmup-steps 1000` | `student_rstable_fresh_long_seed<k>` |
+| strategy | config |
+|---|---|
+| random start, drawn again while its activity runs away; then 500 full-batch L-BFGS steps | `cycling_rstable_lbfgs.toml` |
+| uniform start (gains 1, biases 0; gains scaled by 0.9 while the activity runs away); then L-BFGS | `cycling_uniform_lbfgs.toml` |
+| random start, stable draws, trained on 6,400 new trials of the task instead of the 60 | `cycling_rstable_fresh.toml` |
+| the shuffled-start students, continued with 500 L-BFGS steps | `cycling_shuffled_lbfgs.toml` |
+| the 6,400-trials strategy, longer: 30,000 steps, batch 128, 1,000 warmup steps | `cycling_rstable_fresh_long.toml` |
 
 ## Results
 
@@ -139,7 +156,7 @@ Parameters are only partly recovered in either case: gains come closer to the te
 biases do not.
 
 Figures and tables are in
-`/nrs/scicompsoft/orhane/probes/jaxley_pytorch/activitome-connectome/task-complexity/figures`:
+`/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/figures`:
 
 | file | what it shows |
 |---|---|

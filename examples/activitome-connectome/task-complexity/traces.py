@@ -11,14 +11,13 @@
            best shuffled-start student before and after training.
 
 The two neurons are the excitatory and the inhibitory one whose activity varies most in
-the teacher.
+the teacher. The task settings are those of the task's teacher config in configs/.
 
 Usage: python traces.py --runs <runs dir> --out <dir> [--task cycling]
 """
 import argparse
 import glob
 import os
-import sys
 
 import matplotlib
 
@@ -28,20 +27,25 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import rate_network as rn
-import tasks
-import train
-from summarize import COLORS, INK, INK2, MUTED, SURFACE, excluded, load, style
+from jaxley_pytorch.training import init, rate_network, tasks
+from jaxley_pytorch.training.config import load_config
+from jaxley_pytorch.training.report import COLORS, INK, INK2, MUTED, SURFACE, excluded, load, style
 
-STARTS = {"shuffled": "student_seed*", "random": "student_random_seed*"}
+STARTS = {"shuffled": "{task}_students/seed*", "random": "{task}_students_random/seed*"}
 SHOWN = 64  # text tokens shown
+CONFIGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
+
+
+def task_of(name):
+    """The task of `configs/<name>_teacher.toml`."""
+    task = load_config(os.path.join(CONFIGS, f"{name}_teacher.toml")).task
+    return tasks.TASKS[task.name](**task.kwargs)
 
 
 def best_student(runs, task, pattern):
     """Directory and final task loss of the kept student with the lowest final task loss."""
     best = None
-    for d in sorted(glob.glob(os.path.join(runs, task, pattern))):
+    for d in sorted(glob.glob(os.path.join(runs, pattern.format(task=task)))):
         path = os.path.join(d, "result.json")
         if os.path.exists(path):
             s = load(path)
@@ -53,7 +57,7 @@ def best_student(runs, task, pattern):
 def trained(teacher, run_dir):
     st = torch.load(os.path.join(run_dir, "student.pt"), map_location="cpu", weights_only=True)
     io = {k: v.detach() for k, v in teacher.io.items()}
-    return rn.RateRNN(teacher.sim, teacher.W.detach(), st["g"], st["b"], io, trainable=()), int(st["seed"])
+    return rate_network.RateNetwork(teacher.sim, teacher.W.detach(), st["g"], st["b"], io), int(st["seed"])
 
 
 def two_neurons(a_t, n_exc):
@@ -69,15 +73,23 @@ def cycling_traces(args, teacher, conn):
         best = best_student(args.runs, "cycling", pattern)
         if best is not None:
             students[start] = (os.path.basename(best[0]), best[1], trained(teacher, best[0])[0])
-    inputs, targets = tasks.cycling_trials()
+    task = task_of("cycling")
+    dt_tau = teacher.sim.dt / rate_network.TAU
+    inputs, targets = tasks.cycling_trials(task.trials_seed, task.trials, task.trial_steps, dt_tau, task.omega)
     trials = [int(np.flatnonzero(inputs[:, :, c].sum(1) > 0)[0]) for c in (0, 1)]  # one trial per input
     inp = torch.as_tensor(inputs[trials])
-    runs = {"teacher": train.eval_cycling(teacher, None, inp, len(trials))}
+
+    def outputs(model):
+        with torch.no_grad():
+            z, a, _ = task.run(model, inp, model.sim.rest_states(len(trials)))
+        return {"z_s": z, "a_s": a.transpose(1, 2)}
+
+    runs = {"teacher": outputs(teacher)}
     for start, (_, _, model) in students.items():
-        runs[start] = train.eval_cycling(model, None, inp, len(trials))
+        runs[start] = outputs(model)
     neurons = two_neurons(runs["teacher"]["a_s"].numpy(), conn["n_exc"])
 
-    t = np.arange(tasks.TRIAL_STEPS) * 0.05  # in units of tau
+    t = np.arange(task.trial_steps) * dt_tau  # in units of tau
     fig, axes = plt.subplots(2, 3, figsize=(14, 6.4), sharex=True)
     fig.patch.set_facecolor(SURFACE)
     lines = [("teacher", INK, 1.6)] + [(start, COLORS[start], 1.4) for start in students]
@@ -122,12 +134,11 @@ def token_labels(task, data, ids):
 
 
 def text_traces(args, task, teacher, conn):
-    best = best_student(args.runs, task, "student_seed*")
+    best = best_student(args.runs, task, STARTS["shuffled"])
     after, seed = trained(teacher, best[0])
-    before = train.make_student(teacher, conn, seed, "shuffled")
-    for p in before.parameters():
-        p.requires_grad_(False)
-    data = tasks.DATA[task]
+    before = init.make_student(teacher, conn, "shuffled", seed)
+    text = task_of(task)
+    data = text.data
     meta = tasks.load_meta(data)
     seg = tasks.eval_segments(os.path.join(data, "val.bin"), meta["dtype"], args.eval_segments, args.eval_burn + SHOWN)[0]
     tok = torch.as_tensor(seg[None, :-1])
@@ -135,7 +146,7 @@ def text_traces(args, task, teacher, conn):
     runs = {}
     with torch.no_grad():
         for key, model in (("teacher", teacher), ("after", after), ("before", before)):
-            logits, feats, _ = model.run_text(tok, model.sim.rest_states(1))
+            logits, feats, _ = text.run(model, tok, model.sim.rest_states(1))
             prob = F.softmax(logits[0, args.eval_burn:].float(), dim=-1)[torch.arange(SHOWN), torch.as_tensor(nxt)]
             runs[key] = (prob.numpy(), feats[0, args.eval_burn:].numpy())
     neurons = two_neurons(runs["teacher"][1], conn["n_exc"])
@@ -176,8 +187,8 @@ def main():
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
     torch.set_default_dtype(torch.float32)
-    teacher, conn, _ = train.load_teacher(os.path.join(args.runs, args.task, "teacher"), torch.device("cpu"),
-                                          torch.float32, False)
+    teacher, conn, _ = rate_network.load_network(os.path.join(args.runs, f"{args.task}_teacher", "seed0"),
+                                                 torch.device("cpu"), torch.float32, False)
     if args.task == "cycling":
         fig, info = cycling_traces(args, teacher, conn)
     else:

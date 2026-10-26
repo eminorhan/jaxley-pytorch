@@ -1,0 +1,28 @@
+# Students of the cycling teacher, the paper's start; 15,000 steps instead of 7,000.
+experiment_name = "cycling_students"
+seeds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+[init]
+teacher = "cycling_teacher/seed0"
+start = "shuffled"
+
+[task]
+name = "cycling"
+trials = 60
+trial_steps = 400
+trials_seed = 21
+omega = 3.0
+train_trials = 0
+
+[trainer]
+trainable = ["g", "b"]
+steps = 15000
+warmup_steps = 750
+batch = 32
+lr = 1e-3
+clip = 2.0
+clip_mode = "global"
+eval_every = 50
+log_every = 50
+dtype = "float32"
+

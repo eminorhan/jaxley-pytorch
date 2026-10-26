@@ -1,0 +1,28 @@
+# Control: a student that starts from the teacher's own gains and biases (ran 7,000 steps).
+experiment_name = "cycling_control"
+seeds = [0]
+
+[init]
+teacher = "cycling_teacher/seed0"
+start = "teacher"
+
+[task]
+name = "cycling"
+trials = 60
+trial_steps = 400
+trials_seed = 21
+omega = 3.0
+train_trials = 0
+
+[trainer]
+trainable = ["g", "b"]
+steps = 7000
+warmup_steps = 350
+batch = 32
+lr = 1e-3
+clip = 2.0
+clip_mode = "global"
+eval_every = 50
+log_every = 50
+dtype = "float32"
+

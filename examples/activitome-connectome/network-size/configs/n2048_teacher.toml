@@ -1,0 +1,33 @@
+# The teacher of 2048 neurons: task-complexity's tokens_teacher.toml with neurons = 2048.
+experiment_name = "n2048_teacher"
+seeds = [0]
+
+[model]
+name = "blk_rate"
+neurons = 2048
+exc_frac = 0.7
+connection_prob = 0.5
+dt = 0.5
+
+[task]
+name = "text"
+data = "/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/data/bpe4096"
+width = 75
+steps_per_token = 10
+chunk = 256
+eval_segments = 64
+eval_burn = 32
+eval_length = 256
+
+[trainer]
+trainable = ["W", "g", "b", "embed", "embed_proj", "read_proj", "unembed", "read_bias"]
+steps = 25000
+warmup_steps = 1250
+batch = 32
+lr = 3e-3
+clip = 1.0
+clip_mode = "per_tensor"
+eval_every = 1000
+log_every = 100
+dtype = "float32"
+checkpoint_every = 1000

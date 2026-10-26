@@ -9,8 +9,9 @@ experiment repeats the token version with networks of 512, 1,024 and 2,048 neuro
 
 ## Design
 
-The protocol and code of `../task-complexity` (`train.py --task tokens --n <N>`), token
-task only; only the number of neurons N changes.
+The protocol of `../task-complexity`'s token task, one config per arm in `configs/`
+(`n<N>_teacher.toml`, `n<N>_students.toml`, `n<N>_control.toml`), run by
+`jaxley_pytorch.training`. Only the number of neurons N changes:
 
 | neurons | excitatory | synapses (about N^2 / 2) | gains and biases per student |
 |---|---|---|---|
@@ -54,17 +55,18 @@ change with N.
 
 ## Running
 
-Outputs go to `/nrs/scicompsoft/orhane/probes/jaxley_pytorch/activitome-connectome/network-size`
-(`runs/n<N>/{teacher,student_seed<k>,student_control}/`, `jobs/`, `figures/`; smoke runs
-under `runs/smoke/` and `jobs/smoke/`). Jobs run on a snapshot of the repo
+Outputs go to `/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/network-size`
+(`runs/<experiment_name>/seed<k>/`, `jobs/`, `figures/`; smoke runs under `runs/smoke/` and
+`jobs/smoke/`). Jobs run on a snapshot of the repo
 (`probes/jaxley_pytorch/tools/snapshot.sh`) with `~/myvenv`, one H100 each.
 
 ```bash
-bash submit_smoke.sh  # per size, one H100: 20 steps of a teacher, a student and a control, and the equivalence check; then the summary
+bash submit_smoke.sh  # per size, one H100: every config with --smoke (20 steps); then the summary
 bash submit.sh        # per size: the teacher, then 10 students and a control; then the summary
 ```
 
-`summarize.py` writes `summary.md` and `summary.json` (tables), `training_curves.png` (the
-paper's Fig. 1c-e, one row per size), `outcomes.png` (every student's final task loss
-against its final activity error) and `activity_by_size.png` (every student's final
-activity error, one column per size).
+Every run saves a checkpoint every 1,000 steps; a run that stopped early continues with
+its command plus `--resume`. `summarize.py` writes `summary.md` and `summary.json`
+(tables), `training_curves.png` (the paper's Fig. 1c-e, one row per size), `outcomes.png`
+(every student's final task loss against its final activity error) and
+`activity_by_size.png` (every student's final activity error against the size).

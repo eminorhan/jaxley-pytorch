@@ -1,73 +1,65 @@
 #!/bin/bash
-# Stages 1-2: the three teachers (one H100 each); per task, ten students (a job array) and
-# one control student, which start when their teacher is done; the summary (one CPU job)
-# when all students have ended. All from a snapshot of the repo. Usage: bash submit.sh
+# The experiment's runs with jaxley_pytorch.training (configs/; the stress test is in
+# submit_stress.sh): per task the teacher (one H100); its ten students (a job array) and
+# the control, which start when the teacher is done; for the cycling task also the
+# random-start students. All from a snapshot of the repo; the runs go to
+# runs/<experiment_name>/seed<k>. Usage: bash submit.sh
 set -euo pipefail
 set -x
-EXP=/nrs/scicompsoft/orhane/probes/jaxley_pytorch/activitome-connectome/task-complexity
+EXP=/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity
 S=$(/nrs/scicompsoft/orhane/probes/jaxley_pytorch/tools/snapshot.sh)
-D=$S/examples/activitome-connectome/task-complexity
-mkdir -p $EXP/runs $EXP/jobs $EXP/figures
+C=$S/examples/activitome-connectome/task-complexity/configs
+mkdir -p $EXP/runs $EXP/jobs
 
 # Teachers.
-T_CYCLING=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 1:00 -J tc_teacher_cycling \
-  -o $EXP/jobs/teacher_cycling_%J.log \
+T_CYCLING=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 1:00 -J tc_cycling_teacher \
+  -o $EXP/jobs/cycling_teacher_%J.log \
   "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role teacher --task cycling --out $EXP/runs/cycling/teacher" \
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/cycling_teacher.toml --output-root $EXP/runs" \
   | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
-T_CHARS=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 8:00 -J tc_teacher_chars \
-  -o $EXP/jobs/teacher_chars_%J.log \
+T_CHARS=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 8:00 -J tc_chars_teacher \
+  -o $EXP/jobs/chars_teacher_%J.log \
   "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role teacher --task chars --out $EXP/runs/chars/teacher" \
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/chars_teacher.toml --output-root $EXP/runs" \
   | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
-T_TOKENS=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 8:00 -J tc_teacher_tokens \
-  -o $EXP/jobs/teacher_tokens_%J.log \
+T_TOKENS=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 8:00 -J tc_tokens_teacher \
+  -o $EXP/jobs/tokens_teacher_%J.log \
   "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role teacher --task tokens --out $EXP/runs/tokens/teacher" \
-  | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
-
-# Students: seeds 1-10 per task, from shuffled gains and biases.
-S_CYCLING=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 2:00 -J "tc_students_cycling[1-10]" \
-  -w "done($T_CYCLING)" -o $EXP/jobs/student_cycling_%J_%I.log \
-  "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role student --task cycling --teacher $EXP/runs/cycling/teacher \
-     --seed \$LSB_JOBINDEX --out $EXP/runs/cycling/student_seed\$LSB_JOBINDEX" \
-  | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
-S_CHARS=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 4:00 -J "tc_students_chars[1-10]" \
-  -w "done($T_CHARS)" -o $EXP/jobs/student_chars_%J_%I.log \
-  "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role student --task chars --teacher $EXP/runs/chars/teacher \
-     --seed \$LSB_JOBINDEX --out $EXP/runs/chars/student_seed\$LSB_JOBINDEX" \
-  | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
-S_TOKENS=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 4:00 -J "tc_students_tokens[1-10]" \
-  -w "done($T_TOKENS)" -o $EXP/jobs/student_tokens_%J_%I.log \
-  "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role student --task tokens --teacher $EXP/runs/tokens/teacher \
-     --seed \$LSB_JOBINDEX --out $EXP/runs/tokens/student_seed\$LSB_JOBINDEX" \
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/tokens_teacher.toml --output-root $EXP/runs" \
   | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
 
-# Control students: one per task, from the teacher's own gains and biases.
-C_CYCLING=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 2:00 -J tc_control_cycling \
-  -w "done($T_CYCLING)" -o $EXP/jobs/control_cycling_%J.log \
+# Students: seeds 1-10 per arm.
+bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 2:00 -J "tc_cycling_students[1-10]" -w "done($T_CYCLING)" \
+  -o $EXP/jobs/cycling_students_%J_%I.log \
   "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role student --task cycling --teacher $EXP/runs/cycling/teacher \
-     --init teacher --out $EXP/runs/cycling/student_control" \
-  | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
-C_CHARS=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 4:00 -J tc_control_chars \
-  -w "done($T_CHARS)" -o $EXP/jobs/control_chars_%J.log \
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/cycling_students.toml --output-root $EXP/runs \
+     --seed \$LSB_JOBINDEX"
+bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 2:00 -J "tc_cycling_students_random[1-10]" -w "done($T_CYCLING)" \
+  -o $EXP/jobs/cycling_students_random_%J_%I.log \
   "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role student --task chars --teacher $EXP/runs/chars/teacher \
-     --init teacher --out $EXP/runs/chars/student_control" \
-  | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
-C_TOKENS=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 4:00 -J tc_control_tokens \
-  -w "done($T_TOKENS)" -o $EXP/jobs/control_tokens_%J.log \
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/cycling_students_random.toml --output-root $EXP/runs \
+     --seed \$LSB_JOBINDEX"
+bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 4:00 -J "tc_chars_students[1-10]" -w "done($T_CHARS)" \
+  -o $EXP/jobs/chars_students_%J_%I.log \
   "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role student --task tokens --teacher $EXP/runs/tokens/teacher \
-     --init teacher --out $EXP/runs/tokens/student_control" \
-  | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/chars_students.toml --output-root $EXP/runs \
+     --seed \$LSB_JOBINDEX"
+bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 4:00 -J "tc_tokens_students[1-10]" -w "done($T_TOKENS)" \
+  -o $EXP/jobs/tokens_students_%J_%I.log \
+  "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/tokens_students.toml --output-root $EXP/runs \
+     --seed \$LSB_JOBINDEX"
 
-# Summary: tables and figure.
-bsub -P miaai -n 2 -W 0:30 -J tc_summary \
-  -w "ended($S_CYCLING) && ended($S_CHARS) && ended($S_TOKENS) && ended($C_CYCLING) && ended($C_CHARS) && ended($C_TOKENS)" \
-  -o $EXP/jobs/summary_%J.log \
-  "set -o pipefail; ~/myvenv/bin/python -I $D/summarize.py --runs $EXP/runs --out $EXP/figures"
+# Controls: from the teacher's own gains and biases.
+bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 2:00 -J tc_cycling_control -w "done($T_CYCLING)" \
+  -o $EXP/jobs/cycling_control_%J.log \
+  "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/cycling_control.toml --output-root $EXP/runs"
+bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 4:00 -J tc_chars_control -w "done($T_CHARS)" \
+  -o $EXP/jobs/chars_control_%J.log \
+  "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/chars_control.toml --output-root $EXP/runs"
+bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 4:00 -J tc_tokens_control -w "done($T_TOKENS)" \
+  -o $EXP/jobs/tokens_control_%J.log \
+  "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/tokens_control.toml --output-root $EXP/runs"

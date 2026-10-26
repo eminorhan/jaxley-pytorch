@@ -111,6 +111,22 @@ Hodgkin-Huxley, Pospischil and three-compartment L5PC neurons (sparse, Dale's la
 character-level language models on Andrej Karpathy's cleaned-up [TinyStories](https://huggingface.co/datasets/karpathy/tinystories-gpt4-clean) dataset, with throughput measurements up to
 65,536 neurons, see `examples/language_modeling/README.md` for more details.
 
+## Training networks from config files
+
+`jaxley_pytorch.training` (not part of Jaxley) trains networks of jaxley_pytorch neurons
+on tasks, one TOML config file per arm of an experiment, with a record of every run
+(the config, every value it used, the code's commit):
+
+```bash
+python -m jaxley_pytorch.training --config <arm>.toml --output-root <dir> [--seed k]
+```
+
+It has the rate network of Beiran & Litwin-Kumar (2025), the cycling task and
+next-token prediction, and teacher-student comparisons; see
+`jaxley_pytorch/training/__init__.py`. The experiments that use it are in
+`examples/activitome-connectome/`: how much a task (`task-complexity/`) and the size of
+the network (`network-size/`) constrain single-neuron activity given the connectome.
+
 ## Tests
 
 The upstream test suite is ported to `tests/` (including the golden values of

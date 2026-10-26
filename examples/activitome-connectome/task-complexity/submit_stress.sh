@@ -1,52 +1,48 @@
 #!/bin/bash
-# Stress test of the cycling result (README.md, "Stress test"): four student strategies,
-# ten students each (job arrays, one H100 per student), then the summary (one CPU job).
-# All from a snapshot of the repo. Usage: bash submit_stress.sh
+# The stress test of the cycling result (README.md, "Stress test") with
+# jaxley_pytorch.training: five student strategies (configs/cycling_*), ten students each
+# (job arrays, one H100 per student). All from a snapshot of the repo; the runs go to
+# runs/<experiment_name>/seed<k>, after those of submit.sh (cycling_teacher, and
+# cycling_students for cycling_shuffled_lbfgs). Usage: bash submit_stress.sh
 set -euo pipefail
 set -x
-EXP=/nrs/scicompsoft/orhane/probes/jaxley_pytorch/activitome-connectome/task-complexity
+EXP=/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity
 S=$(/nrs/scicompsoft/orhane/probes/jaxley_pytorch/tools/snapshot.sh)
-D=$S/examples/activitome-connectome/task-complexity
+C=$S/examples/activitome-connectome/task-complexity/configs
+mkdir -p $EXP/runs $EXP/jobs
 
-# 1. Random start (the teacher's initial distribution), drawn again while its activity
-#    runs away; 15,000 Adam steps, then 500 full-batch L-BFGS steps.
-A=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 2:00 -J "tc_stress_rstable[1-10]" \
-  -o $EXP/jobs/stress_rstable_%J_%I.log \
+# Random starts drawn again while they run away; 15,000 Adam steps, then 500 L-BFGS steps.
+bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 2:00 -J "tc_cycling_rstable_lbfgs[1-10]" \
+  -o $EXP/jobs/cycling_rstable_lbfgs_%J_%I.log \
   "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role student --task cycling --teacher $EXP/runs/cycling/teacher \
-     --init random --stable-start 1 --lbfgs-steps 500 \
-     --seed \$LSB_JOBINDEX --out $EXP/runs/cycling/student_rstable_seed\$LSB_JOBINDEX" \
-  | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/cycling_rstable_lbfgs.toml --output-root $EXP/runs \
+     --seed \$LSB_JOBINDEX"
 
-# 2. Uniform start (gains 1, biases 0; gains scaled by 0.9 while the activity runs away);
-#    15,000 Adam steps, then 500 L-BFGS steps.
-B=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 2:00 -J "tc_stress_uniform[1-10]" \
-  -o $EXP/jobs/stress_uniform_%J_%I.log \
+# Uniform starts (gains x 0.9 while they run away); then 500 L-BFGS steps.
+bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 2:00 -J "tc_cycling_uniform_lbfgs[1-10]" \
+  -o $EXP/jobs/cycling_uniform_lbfgs_%J_%I.log \
   "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role student --task cycling --teacher $EXP/runs/cycling/teacher \
-     --init uniform --stable-start 1 --lbfgs-steps 500 \
-     --seed \$LSB_JOBINDEX --out $EXP/runs/cycling/student_uniform_seed\$LSB_JOBINDEX" \
-  | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/cycling_uniform_lbfgs.toml --output-root $EXP/runs \
+     --seed \$LSB_JOBINDEX"
 
-# 3. Random start, stable draws, trained on 6,400 new trials of the task instead of the 60.
-C=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 2:00 -J "tc_stress_rstable_fresh[1-10]" \
-  -o $EXP/jobs/stress_rstable_fresh_%J_%I.log \
+# Stable random starts trained on 6,400 new trials of the task.
+bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 2:00 -J "tc_cycling_rstable_fresh[1-10]" \
+  -o $EXP/jobs/cycling_rstable_fresh_%J_%I.log \
   "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role student --task cycling --teacher $EXP/runs/cycling/teacher \
-     --init random --stable-start 1 --fresh-trials 6400 \
-     --seed \$LSB_JOBINDEX --out $EXP/runs/cycling/student_rstable_fresh_seed\$LSB_JOBINDEX" \
-  | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/cycling_rstable_fresh.toml --output-root $EXP/runs \
+     --seed \$LSB_JOBINDEX"
 
-# 4. The shuffled-start students (the paper's), continued with 500 L-BFGS steps.
-E=$(bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 1:00 -J "tc_stress_shuffled_lbfgs[1-10]" \
-  -o $EXP/jobs/stress_shuffled_lbfgs_%J_%I.log \
+# The same, 30,000 steps at batch 128.
+bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 4:00 -J "tc_cycling_rstable_fresh_long[1-10]" \
+  -o $EXP/jobs/cycling_rstable_fresh_long_%J_%I.log \
   "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
-   ~/myvenv/bin/python $D/train.py --role student --task cycling --teacher $EXP/runs/cycling/teacher \
-     --init-from $EXP/runs/cycling/student_seed\$LSB_JOBINDEX --steps 0 --lbfgs-steps 500 \
-     --seed \$LSB_JOBINDEX --out $EXP/runs/cycling/student_shuffled_lbfgs_seed\$LSB_JOBINDEX" \
-  | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/cycling_rstable_fresh_long.toml --output-root $EXP/runs \
+     --seed \$LSB_JOBINDEX"
 
-# Summary: stress_test.md and stress_test.png.
-bsub -P miaai -n 2 -W 0:15 -J tc_stress_summary -w "ended($A) && ended($B) && ended($C) && ended($E)" \
-  -o $EXP/jobs/stress_summary_%J.log \
-  "set -o pipefail; ~/myvenv/bin/python -I $D/stress_test.py --runs $EXP/runs --out $EXP/figures"
+# The shuffled-start students continued with 500 L-BFGS steps (8 of 10 ran into this
+# one-hour limit in the original runs; their last evaluation counts).
+bsub -P miaai -q gpu_h100 -gpu "num=1" -n 12 -W 1:00 -J "tc_cycling_shuffled_lbfgs[1-10]" \
+  -o $EXP/jobs/cycling_shuffled_lbfgs_%J_%I.log \
+  "set -o pipefail; export OMP_NUM_THREADS=12 PYTHONPATH=$S PYTHONPYCACHEPREFIX=\$(mktemp -d); \
+   ~/myvenv/bin/python -P -m jaxley_pytorch.training --config $C/cycling_shuffled_lbfgs.toml --output-root $EXP/runs \
+     --seed \$LSB_JOBINDEX"

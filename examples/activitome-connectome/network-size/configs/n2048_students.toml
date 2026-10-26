@@ -1,0 +1,30 @@
+# Students of the 2048-neuron teacher: task-complexity's tokens_students.toml.
+experiment_name = "n2048_students"
+seeds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+[init]
+teacher = "n2048_teacher/seed0"
+start = "shuffled"
+
+[task]
+name = "text"
+data = "/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/data/bpe4096"
+width = 75
+steps_per_token = 10
+chunk = 256
+eval_segments = 64
+eval_burn = 32
+eval_length = 256
+
+[trainer]
+trainable = ["g", "b"]
+steps = 10000
+warmup_steps = 500
+batch = 32
+lr = 1e-3
+clip = 2.0
+clip_mode = "global"
+eval_every = 250
+log_every = 50
+dtype = "float32"
+checkpoint_every = 1000

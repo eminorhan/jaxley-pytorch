@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "jaxley-pytorch"
 version = "0.1.0"
 description = "A PyTorch port of Jaxley: differentiable simulation of biophysical neuron models."
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 keywords = ["neuroscience", "biophysics", "simulator", "pytorch"]

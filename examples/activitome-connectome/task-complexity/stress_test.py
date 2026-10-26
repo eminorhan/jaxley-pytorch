@@ -1,8 +1,8 @@
 """Stress test of the cycling result: can a student reach both the teacher's task loss and
 the teacher's single-neuron activity? Compares training strategies (see README.md).
 
-Reads `<runs>/cycling/<pattern>/result.json` for every strategy in STRATEGIES and the
-control (`student_control`), and writes to `--out`:
+Reads `<runs>/<arm>/seed<k>/result.json` for every strategy in STRATEGIES (the arms of
+configs/cycling_*.toml) and the control (`cycling_control`), and writes to `--out`:
 
   stress_test.md   per strategy: students, how many ran away (left out: non-finite task
                    loss or a higher one than at the start), how many the time limit stopped
@@ -19,7 +19,6 @@ Usage: python stress_test.py --runs <runs dir> --out <dir>
 import argparse
 import glob
 import os
-import sys
 
 import matplotlib
 
@@ -27,8 +26,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from summarize import COLORS, INK, INK2, MUTED, SURFACE, load, style
+from jaxley_pytorch.training.report import COLORS, INK, INK2, MUTED, SURFACE, load, style
 
 
 def ran_away(s):
@@ -37,14 +35,14 @@ def ran_away(s):
     first, last = s["evals"][0]["task_loss"], s["evals"][-1]["task_loss"]
     return not np.isfinite(last) or last > first
 
-STRATEGIES = [  # (directory pattern, label)
-    ("student_seed*", "shuffled start (the paper's)"),
-    ("student_shuffled_lbfgs_seed*", "shuffled start + L-BFGS"),
-    ("student_random_seed*", "random start"),
-    ("student_rstable_seed*", "random start, stable draws + L-BFGS"),
-    ("student_uniform_seed*", "uniform start + L-BFGS"),
-    ("student_rstable_fresh_seed*", "random start, stable draws, 6,400 trials"),
-    ("student_rstable_fresh_long_seed*", "... 30k steps, batch 128, warmup 1k"),
+STRATEGIES = [  # (arm: experiment_name of its config, label)
+    ("cycling_students", "shuffled start (the paper's)"),
+    ("cycling_shuffled_lbfgs", "shuffled start + L-BFGS"),
+    ("cycling_students_random", "random start"),
+    ("cycling_rstable_lbfgs", "random start, stable draws + L-BFGS"),
+    ("cycling_uniform_lbfgs", "uniform start + L-BFGS"),
+    ("cycling_rstable_fresh", "random start, stable draws, 6,400 trials"),
+    ("cycling_rstable_fresh_long", "... 30k steps, batch 128, warmup 1k"),
 ]
 TARGET_LOSS, TARGET_ACT = 2.0, 0.1  # x the teacher's task loss; x the shuffled baseline
 CONTEXT = "#c3c2b7"
@@ -64,14 +62,13 @@ def main():
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
-    root = os.path.join(args.runs, "cycling")
-    control = load(os.path.join(root, "student_control", "result.json"))
+    control = load(os.path.join(args.runs, "cycling_control", "seed0", "result.json"))
     base = control["baselines"]
     teacher_loss = control["evals"][0]["teacher_task_loss"]
 
     groups = []
-    for pattern, label in STRATEGIES:
-        dirs = sorted(glob.glob(os.path.join(root, pattern)))
+    for arm, label in STRATEGIES:
+        dirs = sorted(glob.glob(os.path.join(args.runs, arm, "seed*")))
         if not dirs:
             continue
         results = [load(os.path.join(d, "result.json")) for d in dirs if os.path.exists(os.path.join(d, "result.json"))]

@@ -1,9 +1,9 @@
 """Tables and figures of the task-complexity experiment (see README.md).
 
 Reads, per task (`--tasks`, default cycling chars tokens; missing ones are skipped), the
-result.json of `<runs>/<task>/teacher`, of the students `student_seed*` (shuffled
-start), `student_random_seed*` (random start) and of `student_control`, and writes to
-`--out`:
+result.json of the runs of configs/<task>_teacher.toml, of the students
+<task>_students.toml (shuffled start) and <task>_students_random.toml (random start), and
+of <task>_control.toml (`<runs>/<experiment_name>/seed<k>`), and writes to `--out`:
 
   summary.md, summary.json  the tables;
   training_curves.png       the paper's Fig. 1c-e for every task (one row per task);
@@ -27,53 +27,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from jaxley_pytorch.training.report import (COLORS, INK, INK2, MUTED, SURFACE, excluded, load, spread,
+                                            steps_in_thousands, style)
+
 TASKS = ["cycling", "chars", "tokens"]
 LOSS = {"cycling": "task loss (MSE)", "chars": "task loss (bits/token)", "tokens": "task loss (bits/token)"}
 # A student solves the task if its task loss is at most this many times the teacher's.
 SOLVED = {"cycling": 2.0, "chars": 1.02, "tokens": 1.02}
-STARTS = {"shuffled": "student_seed*", "random": "student_random_seed*"}
-
-# Colors: the dataviz reference palette (categorical slots 1-3 and chart ink).
-SURFACE, INK, INK2, MUTED, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
-COLORS = {"shuffled": "#2a78d6", "random": "#eb6834", "control": "#1baf7a"}
+STARTS = {"shuffled": "{task}_students/seed*", "random": "{task}_students_random/seed*"}
 LABELS = {"shuffled": "students, shuffled start", "random": "students, random start",
           "control": "control: teacher's own start"}
-
-
-def load(path):
-    with open(path) as f:
-        return json.load(f)
-
-
-def excluded(s):
-    """Did not finish, or ended with a higher task loss than it started with."""
-    first, last = s["evals"][0]["task_loss"], s["evals"][-1]["task_loss"]
-    return "final" not in s or not np.isfinite(last) or last > first
-
-
-def spread(values, fmt="{:.3g}"):
-    v = np.asarray(values, dtype=float)
-    if len(v) == 0:
-        return "-"
-    return (fmt + " [" + fmt + ", " + fmt + "]").format(np.median(v), v.min(), v.max())
-
-
-def steps_in_thousands(ax):
-    ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=5, integer=True))
-    ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x, _: f"{x / 1000:g}k" if x else "0"))
-
-
-def style(ax):
-    ax.set_facecolor(SURFACE)
-    ax.grid(True, color=GRID, lw=0.6)
-    ax.set_axisbelow(True)
-    for side in ["top", "right"]:
-        ax.spines[side].set_visible(False)
-    for side in ["left", "bottom"]:
-        ax.spines[side].set_color(AXIS)
-    ax.tick_params(colors=INK2, labelsize=8)
-    ax.xaxis.label.set_color(INK2)
-    ax.yaxis.label.set_color(INK2)
 
 
 def student_row(task, start, students, n_excluded, control, base):
@@ -97,7 +60,7 @@ def student_row(task, start, students, n_excluded, control, base):
 
 def load_students(runs, task, pattern):
     """(students that finished without running away, number left out)."""
-    dirs = sorted(glob.glob(os.path.join(runs, task, pattern)))
+    dirs = sorted(glob.glob(os.path.join(runs, pattern.format(task=task))))
     results = [load(os.path.join(d, "result.json")) for d in dirs if os.path.exists(os.path.join(d, "result.json"))]
     kept = [s for s in results if not excluded(s)]
     return kept, len(dirs) - len(kept)
@@ -225,9 +188,9 @@ def main():
 
     summary, teacher_rows, student_rows, curves = {}, [], [], {}
     for task in args.tasks:
-        tpath = os.path.join(args.runs, task, "teacher", "result.json")
+        tpath = os.path.join(args.runs, f"{task}_teacher", "seed0", "result.json")
         groups = {start: load_students(args.runs, task, pattern) for start, pattern in STARTS.items()}
-        cpath = os.path.join(args.runs, task, "student_control", "result.json")
+        cpath = os.path.join(args.runs, f"{task}_control", "seed0", "result.json")
         control = load(cpath) if os.path.exists(cpath) else None
         if not os.path.exists(tpath) and not any(students for students, _ in groups.values()):
             continue

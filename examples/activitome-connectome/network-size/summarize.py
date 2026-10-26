@@ -1,8 +1,8 @@
 """Tables and figures of the network-size experiment (see README.md).
 
-Reads every directory in `--dirs`, one network size each (`teacher/`, `student_seed<k>/`
-and `student_control/`, as `train.py` writes them; the size is the teacher's number of
-neurons), and writes to `--out`:
+Reads, for every network size N in `--sizes`, the runs of configs/n<N>_teacher.toml,
+n<N>_students.toml and n<N>_control.toml in `--runs` (`n<N>_teacher/seed0`,
+`n<N>_students/seed<k>`, `n<N>_control/seed0`), and writes to `--out`:
 
   summary.md, summary.json  the tables;
   training_curves.png       the paper's Fig. 1c-e, one row per size;
@@ -11,16 +11,15 @@ neurons), and writes to `--out`:
   activity_by_size.png      every student's final activity error against the size.
 
 Students that did not finish, or ended with a higher task loss than they started with
-(their activity ran away), are left out of the statistics and figures and counted, as in
-../task-complexity/summarize.py, whose helpers and colors this script uses.
+(their activity ran away), are left out of the statistics and figures and counted
+(`jaxley_pytorch.training.report.excluded`).
 
-Usage: python summarize.py --dirs <runs>/n512 <runs>/n1024 <runs>/n2048 --out <dir>
+Usage: python summarize.py --runs <runs dir> --sizes 512 1024 2048 --out <dir>
 """
 import argparse
 import glob
 import json
 import os
-import sys
 
 import matplotlib
 
@@ -28,9 +27,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-# The namesake of this script in ../task-complexity.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "task-complexity"))
-from summarize import COLORS, INK, INK2, MUTED, SURFACE, excluded, load, spread, steps_in_thousands, style
+from jaxley_pytorch.training.report import (COLORS, INK, INK2, MUTED, SURFACE, excluded, load, spread,
+                                            steps_in_thousands, style)
 
 SOLVED = 1.02  # a student solves the task if its task loss is at most this many times the teacher's
 LABELS = {"shuffled": "students, shuffled start", "control": "control: teacher's own start"}
@@ -41,13 +39,15 @@ def load_run(run_dir):
     return load(path) if os.path.exists(path) else None
 
 
-def load_size(d):
+def load_size(runs, n):
     """Teacher, students that finished without running away, number left out, and control
-    of one size's directory (None for a missing run)."""
-    runs = sorted(glob.glob(os.path.join(d, "student_seed*")))
-    students = [s for s in map(load_run, runs) if s is not None]
+    of the size `n` (None for a missing run)."""
+    dirs = sorted(glob.glob(os.path.join(runs, f"n{n}_students", "seed*")))
+    students = [s for s in map(load_run, dirs) if s is not None]
     kept = [s for s in students if not excluded(s)]
-    return load_run(os.path.join(d, "teacher")), kept, len(runs) - len(kept), load_run(os.path.join(d, "student_control"))
+    teacher = load_run(os.path.join(runs, f"n{n}_teacher", "seed0"))
+    control = load_run(os.path.join(runs, f"n{n}_control", "seed0"))
+    return teacher, kept, len(dirs) - len(kept), control
 
 
 def above_teacher(e):
@@ -180,19 +180,19 @@ def activity_by_size(sizes, path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dirs", nargs="+", required=True, help="one directory per network size")
+    parser.add_argument("--runs", required=True)
+    parser.add_argument("--sizes", nargs="+", type=int, required=True)
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
     sizes = {}
-    for d in args.dirs:
-        teacher, kept, n_excluded, control = load_size(d)
+    for n in sorted(args.sizes):
+        teacher, kept, n_excluded, control = load_size(args.runs, n)
         if teacher is None:
-            print(f"{d}: no teacher result, left out", flush=True)
+            print(f"{n} neurons: no teacher result, left out", flush=True)
             continue
-        sizes[int(teacher["args"]["n"])] = (teacher, kept, n_excluded, control)
-    sizes = dict(sorted(sizes.items()))
+        sizes[n] = (teacher, kept, n_excluded, control)
 
     summary, teacher_rows, student_rows = {}, [], []
     for n, (teacher, kept, n_excluded, control) in sizes.items():
