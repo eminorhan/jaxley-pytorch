@@ -3,7 +3,8 @@
 # <https://www.apache.org/licenses/>
 """Where a run's network starts when it is a teacher's (`[init]`, see
 `config.InitConfig`): the teacher's connectivity, weights, inputs and readout, with
-gains and biases as `start` says:
+gains and biases (of a spiking network: its single-neuron parameters, see
+`spiking_network.make_student`) as `start` says:
 
   shuffled  the teacher's, permuted within the excitatory and within the inhibitory
             neurons, gains halved (the paper's students, `nn_fig1_trainStudent.py`);
@@ -22,6 +23,7 @@ from typing import Callable, Dict, Optional, Tuple
 import numpy as np
 import torch
 
+from jaxley_pytorch.training import spiking_network
 from jaxley_pytorch.training.rate_network import RateNetwork, random_gains_biases
 
 STARTS = ("shuffled", "random", "uniform", "teacher", "student")
@@ -36,7 +38,10 @@ def make_student(
     gain_scale: float = 1.0,
 ) -> RateNetwork:
     """A network with the teacher's weights, inputs and readout and the gains and biases
-    of `start` (drawn with `seed`), the gains then multiplied by `gain_scale`."""
+    of `start` (drawn with `seed`), the gains then multiplied by `gain_scale`. A spiking
+    teacher's students start as `spiking_network.make_student` says."""
+    if isinstance(teacher, spiking_network.SpikingNetwork):
+        return spiking_network.make_student(teacher, conn, start, seed, student_dir)
     g = teacher.g.detach().cpu().double().numpy().copy()
     b = teacher.b.detach().cpu().double().numpy().copy()
     rng = np.random.default_rng(seed)

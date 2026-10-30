@@ -1,0 +1,39 @@
+# The teacher of 1,024 Hodgkin-Huxley neurons, 150 inputs each: task-complexity's token task with spiking neurons.
+experiment_name = "hh_n1024_teacher"
+seeds = [0]
+
+[model]
+name = "hh"
+neurons = 1024
+exc_frac = 0.8
+fan_in = 150
+dt = 0.025
+input_scale = 6.0
+w_exc = 0.002  # a tenth of examples/language_modeling's: gradients flat over the 256-token chunk at initialisation
+w_inh = 0.01
+spread = 0.25
+
+[task]
+name = "text"
+data = "/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/data/bpe4096"
+width = 75
+steps_per_token = 200
+chunk = 256
+eval_segments = 64
+eval_burn = 32
+eval_length = 256
+
+[trainer]
+trainable = ["W", "gNa", "gK", "gLeak", "bias", "embed", "embed_proj", "read_proj", "unembed", "read_bias"]
+steps = 5000
+warmup_steps = 250
+batch = 32
+lr = 3e-4  # the pilot compares 3e-4, 1e-3 and 3e-3
+optimizer = "adamw"
+weight_decay = 0.0
+clip = 1.0
+clip_mode = "per_tensor"
+eval_every = 250
+log_every = 10
+dtype = "float32"
+checkpoint_every = 250

@@ -8,10 +8,15 @@ import json
 import math
 import os
 import time
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple
 
 import numpy as np
 import torch
+
+# No weight decay on gains, biases and the readout bias (mia-train exempts norm gains and
+# biases the same way): decay would pull them toward zero, not regularize a weight.
+# The single-neuron parameters (of rate and spiking networks) and the readout bias.
+NO_DECAY = ("g", "b", "read_bias", "gNa", "gK", "gKm", "gLeak", "bias")
 
 
 def lr_factor(steps: int, warmup_steps: int) -> Callable[[int], float]:
@@ -26,12 +31,29 @@ def lr_factor(steps: int, warmup_steps: int) -> Callable[[int], float]:
     return factor
 
 
-def make_optimizer(params: List[torch.Tensor], cfg, use_graph: bool):
-    """Adam and its learning-rate schedule (`lr_factor`). With CUDA graphs the learning
-    rate is a tensor, which the scheduler updates in place, so the change reaches the
+def make_optimizer(named_params: List[Tuple[str, torch.Tensor]], cfg, use_graph: bool):
+    """AdamW or Adam (`cfg.optimizer`) and its learning-rate schedule (`lr_factor`).
+    AdamW's decoupled weight decay `cfg.weight_decay` applies to every parameter except
+    those in `NO_DECAY`. With CUDA graphs the learning rate is a tensor (one per
+    parameter group), which the scheduler updates in place, so the change reaches the
     captured step."""
-    lr = torch.tensor(cfg.lr, device=params[0].device) if use_graph else cfg.lr
-    opt = torch.optim.Adam(params, lr=lr, capturable=use_graph)
+    device = named_params[0][1].device
+
+    def lr():
+        return torch.tensor(cfg.lr, device=device) if use_graph else cfg.lr
+
+    if cfg.optimizer == "adam":
+        params = [p for _, p in named_params]
+        opt = torch.optim.Adam(params, lr=lr(), capturable=use_graph)
+    else:
+        decay = [p for n, p in named_params if n not in NO_DECAY]
+        no_decay = [p for n, p in named_params if n in NO_DECAY]
+        groups = [
+            {"params": ps, "weight_decay": wd, "lr": lr()}
+            for ps, wd in ((decay, cfg.weight_decay), (no_decay, 0.0))
+            if ps
+        ]
+        opt = torch.optim.AdamW(groups, lr=lr(), capturable=use_graph)
     factor = lr_factor(cfg.steps, cfg.warmup_steps)
     return opt, torch.optim.lr_scheduler.LambdaLR(opt, factor)
 
@@ -98,7 +120,7 @@ class Checkpoint:
 
 def fit(
     cfg,
-    params: List[torch.Tensor],
+    named_params: List[Tuple[str, torch.Tensor]],
     loss_fn: Callable,
     carry: Callable,
     next_batch: Callable,
@@ -107,15 +129,16 @@ def fit(
     save_log: Callable,
     checkpoint: Checkpoint = None,
 ):
-    """`cfg.steps` steps of Adam on `params` (`cfg` is a `config.TrainerConfig`).
+    """`cfg.steps` steps of AdamW or Adam (`make_optimizer`) on the parameters of
+    `named_params`, (name, tensor) pairs (`cfg` is a `config.TrainerConfig`).
 
     Every step, `next_batch()` fills the static inputs and `loss_fn()` returns the loss
     and the network state to carry to the next step (or None), which `carry(state)`
     stores after the update. The learning rate warms up linearly over
     `cfg.warmup_steps` and then decays linearly to zero; gradients are clipped at
     `cfg.clip`. On CUDA (`cfg.cuda_graph`), the step (simulation, loss, backward pass,
-    clipping, Adam) is captured in a CUDA graph after two eager steps on a side stream
-    and replayed, as in examples/language_modeling/train.py.
+    clipping, optimizer) is captured in a CUDA graph after two eager steps on a side
+    stream and replayed, as in examples/language_modeling/train.py.
 
     `evaluate(step)` runs before training, every `cfg.eval_every` steps and at the end;
     `save_log()` then writes `log` (its "train", "evals" and "timing"). With
@@ -123,9 +146,10 @@ def fit(
     limit `cfg.hours` stops it, and resumes from the checkpoint if there is one.
     Returns False if the time limit stopped the run, True if it took every step."""
     n_steps = cfg.steps
+    params = [p for _, p in named_params]
     device = params[0].device
     use_graph = cfg.cuda_graph and device.type == "cuda"
-    opt, scheduler = make_optimizer(params, cfg, use_graph)
+    opt, scheduler = make_optimizer(named_params, cfg, use_graph)
     first = 0
     if checkpoint is not None and checkpoint.exists():
         first = checkpoint.restore(opt, scheduler, log)

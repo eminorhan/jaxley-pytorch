@@ -11,7 +11,10 @@ import numpy as np
 import pytest
 import torch
 
+from jaxley_pytorch.training import networks
+from jaxley_pytorch.training.rate_network import BLKRate
 from jaxley_pytorch.training.run import main
+from jaxley_pytorch.training.tasks import Text
 
 MODEL = """
 [model]
@@ -57,7 +60,9 @@ compile = false
 cuda_graph = false
 """
 TEACHER = '["W", "g", "b", "w_out"]'
-TEXT_TEACHER = '["W", "g", "b", "embed", "embed_proj", "read_proj", "unembed", "read_bias"]'
+TEXT_TEACHER = (
+    '["W", "g", "b", "embed", "embed_proj", "read_proj", "unembed", "read_bias"]'
+)
 
 
 def head(name, seeds=(0,)):
@@ -76,7 +81,9 @@ def run(tmp_path, name, text, *args):
     path = tmp_path / f"{name}.toml"
     path.write_text(text)
     root = tmp_path / "runs"
-    return main(["--config", str(path), "--output-root", str(root), "--device", "cpu", *args])
+    return main(
+        ["--config", str(path), "--output-root", str(root), "--device", "cpu", *args]
+    )
 
 
 def result(out):
@@ -94,7 +101,9 @@ def test_cycling(tmp_path):
     assert [e["step"] for e in r["evals"]] == [0, 2, 3] and r["final"]["step"] == 3
     assert r["neurons"] == 32 and "participation_ratio" in r["final"]
 
-    students = head("students", (1, 2)) + init() + cycling + trainer('["g", "b"]', steps=2)
+    students = (
+        head("students", (1, 2)) + init() + cycling + trainer('["g", "b"]', steps=2)
+    )
     out = run(tmp_path, "students", students, "--seed", "2")
     r = result(out)
     for key in ["act_mse", "act_corr_err", "teacher_task_loss", "output_vs_teacher"]:
@@ -105,7 +114,9 @@ def test_cycling(tmp_path):
     assert resolved["init"]["teacher"] == str(tmp_path / "runs" / "teacher" / "seed0")
 
     # Another student's gains and biases, then full-batch L-BFGS only.
-    text = head("continued", (2,)) + init("student", 'student = "students/seed{seed}"\n')
+    text = head("continued", (2,)) + init(
+        "student", 'student = "students/seed{seed}"\n'
+    )
     lbfgs = "lbfgs_steps = 2\nlbfgs_eval_every = 1\n"
     text += cycling + trainer('["g", "b"]', steps=0, extra=lbfgs)
     c = result(run(tmp_path, "continued", text))
@@ -131,6 +142,36 @@ def text_data(tmp_path):
     return d
 
 
+def test_bptt_tokens(text_data):
+    """bptt_tokens cuts the gradient through the states every bptt_tokens tokens: the
+    same loss, a different gradient (the full one at bptt_tokens = chunk)."""
+    kwargs = dict(width=4, steps_per_token=3, chunk=6, eval_segments=2, eval_burn=1)
+    task = Text(str(text_data), eval_length=3, **kwargs)
+    model = BLKRate(20, 0.7, dt=0.5, connection_prob=0.5)
+    net, _ = networks.new_network(
+        model, task.init_io, 0, torch.device("cpu"), torch.float64, False
+    )
+    task.prepare(net.sim, 0, 2)
+    task.next_batch()
+    net.set_trainable(["W"])
+
+    def loss_and_grad(bptt_tokens):
+        task.bptt_tokens = bptt_tokens
+        net.W.grad = None
+        loss, _ = task.loss(net)
+        loss.backward()
+        return float(loss.detach()), net.W.grad.clone()
+
+    full, grad_full = loss_and_grad(None)
+    whole, grad_whole = loss_and_grad(6)
+    cut, grad_cut = loss_and_grad(1)
+    assert full == whole == cut
+    assert torch.equal(grad_full, grad_whole)
+    assert not torch.allclose(grad_full, grad_cut)
+    with pytest.raises(ValueError, match="bptt_tokens must be an integer"):
+        Text(str(text_data), eval_length=3, bptt_tokens=7, **kwargs)
+
+
 def test_text(tmp_path, text_data):
     text = TEXT.format(data=text_data)
     teacher = head("teacher") + MODEL + text + trainer(TEXT_TEACHER, batch=2)
@@ -143,7 +184,11 @@ def test_text(tmp_path, text_data):
 
     other = text.replace(str(text_data), str(tmp_path))
     with pytest.raises(SystemExit, match="the teacher was trained with"):
-        run(tmp_path, "other", head("other") + init() + other + trainer('["g", "b"]', batch=2))
+        run(
+            tmp_path,
+            "other",
+            head("other") + init() + other + trainer('["g", "b"]', batch=2),
+        )
 
 
 def test_refuse_and_resume(tmp_path):
@@ -165,3 +210,48 @@ def test_refuse_and_resume(tmp_path):
     for key in a:
         assert torch.equal(a[key], b[key]), key
     assert result(out)["final"]["task_loss"] == result(full)["final"]["task_loss"]
+
+
+SPIKING = """
+[model]
+name = "pospischil"
+neurons = 10
+exc_frac = 0.8
+fan_in = 5
+dt = 0.025
+input_scale = 2.0
+w_exc = 0.01
+w_inh = 0.05
+spread = 0.25
+"""
+SPIKING_TEACHER = (
+    '["W", "gNa", "gK", "gKm", "gLeak", "bias", "embed", "embed_proj", "read_proj", '
+    '"unembed", "read_bias"]'
+)
+NEURON_PARAMS = '["gNa", "gK", "gKm", "gLeak", "bias"]'
+
+
+def test_spiking_text(tmp_path, text_data):
+    """A spiking teacher and student: firing rates, spike counts against the teacher's,
+    an error and a shuffled baseline for every single-neuron parameter."""
+    text = TEXT.format(data=text_data)
+    teacher = head("teacher") + SPIKING + text + trainer(SPIKING_TEACHER, batch=2)
+    r = result(run(tmp_path, "teacher", teacher))
+    assert np.isfinite(r["final"]["task_loss"]) and r["final"]["firing_rate_hz"] >= 0
+    assert r["neurons"] == 10 and r["synapses"] == 50 and r["k"] == 5
+
+    students = head("students", (1,)) + init() + text + trainer(NEURON_PARAMS, batch=2)
+    out = run(tmp_path, "students", students)
+    r = result(out)
+    for key in [
+        "spike_mse",
+        "teacher_firing_rate_hz",
+        "gKm_rmse",
+        "bias_rmse",
+        "act_mse",
+    ]:
+        assert np.isfinite(r["final"][key]), key
+    for key in ["spike_mse_shuffled", "gNa_rmse_shuffled", "gKm_rmse_shuffled"]:
+        assert r["baselines"][key] >= 0, key
+    saved = torch.load(out / "student.pt", weights_only=True)
+    assert set(saved) >= {"gNa", "gK", "gKm", "gLeak", "bias"}

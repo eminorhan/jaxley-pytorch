@@ -1,12 +1,12 @@
-# The teacher of 1024 neurons: task-complexity's tokens_teacher.toml with neurons = 1024.
-experiment_name = "n1024_teacher"
+# The teacher of 600 neurons with 150 inputs each (connection probability 0.25): task-complexity's tokens_teacher.toml with neurons = 600, fan_in = 150.
+experiment_name = "n600_teacher"
 seeds = [0]
 
 [model]
 name = "blk_rate"
-neurons = 1024
+neurons = 600
 exc_frac = 0.7
-connection_prob = 0.5
+fan_in = 150
 dt = 0.5
 
 [task]
@@ -25,6 +25,8 @@ steps = 25000
 warmup_steps = 1250
 batch = 32
 lr = 3e-3
+optimizer = "adamw"
+weight_decay = 0.0
 clip = 1.0
 clip_mode = "per_tensor"
 eval_every = 1000

@@ -43,7 +43,7 @@ from typing import Dict, Optional
 import torch
 
 import jaxley_pytorch
-from jaxley_pytorch.training import engine, init, metrics, rate_network
+from jaxley_pytorch.training import engine, init, metrics, networks, rate_network
 from jaxley_pytorch.training.config import Component, RunConfig, load_config
 from jaxley_pytorch.training.tasks import TASKS
 
@@ -168,7 +168,9 @@ def code_version() -> Dict:
                     patch += f"# untracked, over 1 MB, not included: {name}\n"
                     continue
                 # `git diff --no-index` exits with 1 when the files differ.
-                diff = _git("diff", "--no-index", "--", "/dev/null", name, ok_codes=(0, 1))
+                diff = _git(
+                    "diff", "--no-index", "--", "/dev/null", name, ok_codes=(0, 1)
+                )
                 patch += diff or ""
             dirty = " (dirty)" if patch.strip() else ""
             return {"stamp": commit.strip() + dirty, "patch": patch}
@@ -235,15 +237,15 @@ def train(
     task = TASKS[cfg.task.name](**cfg.task.kwargs)
     teacher, start = None, {}
     if cfg.init is None:
-        model = rate_network.BLKRate(**cfg.model.kwargs)
-        net, conn = rate_network.new_network(
+        model = networks.MODELS[cfg.model.name](**cfg.model.kwargs)
+        net, conn = networks.new_network(
             model, task.init_io, seed, device, dtype, t.compile
         )
         settings = {"model": model.settings(), "task": cfg.task.settings()}
         task.prepare(net.sim, seed, t.batch)
     else:
         teacher_dir = run_path(root, cfg.init.teacher, seed)
-        teacher, conn, settings = rate_network.load_network(
+        teacher, conn, settings = networks.load_network(
             str(teacher_dir), device, dtype, t.compile
         )
         task.prepare(teacher.sim, seed, t.batch)
@@ -262,6 +264,7 @@ def train(
             student = cfg.init.student and str(run_path(root, cfg.init.student, seed))
             net = init.make_student(teacher, conn, cfg.init.start, seed, student)
     params = net.set_trainable(t.trainable)
+    named = [(n, p) for n, p in net.named_weights() if p.requires_grad]
 
     if teacher is None:
 
@@ -295,7 +298,10 @@ def train(
     if teacher is not None:
         log["start"] = start
         log["teacher"] = {"dir": str(teacher_dir), **metrics.activity_stats(a_t, basis)}
-        log["baselines"] = metrics.baselines(a_t, teacher, basis)
+        log["baselines"] = {
+            **metrics.baselines(a_t, teacher, basis),
+            **task.extra_baselines(),
+        }
         print(
             json.dumps({"teacher": log["teacher"], "baselines": log["baselines"]}),
             flush=True,
@@ -318,16 +324,19 @@ def train(
                 str(out / "network.pt"), net, conn, settings["model"], settings["task"]
             )
         else:
-            trained = {
-                n: p.detach().cpu() for n, p in net.named_weights() if p.requires_grad
+            # The single-neuron parameters and everything trained.
+            keep = set(net.neuron_param_names)
+            st = {
+                n: p.detach().cpu()
+                for n, p in net.named_weights()
+                if n in keep or p.requires_grad
             }
-            st = {"g": net.g.detach().cpu(), "b": net.b.detach().cpu(), **trained}
             torch.save(dict(st, seed=seed, start=cfg.init.start), out / "student.pt")
 
     checkpoint = engine.Checkpoint(str(out / "checkpoint.pt"), get_state, set_state)
     done = engine.fit(
         t,
-        params,
+        named,
         lambda: task.loss(net),
         task.carry,
         task.next_batch,

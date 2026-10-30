@@ -5,20 +5,21 @@ single-neuron activity of a 300-neuron network: students that share the teacher'
 synaptic weights and learn only their gains and biases from the task end with the
 teacher's activity (BPE tokens: activity error 0.0047 of the shuffled-neuron baseline,
 per-neuron correlation 0.997), while on the paper's cycling task they do not. This
-experiment repeats the token version with networks of 512, 1,024 and 2,048 neurons.
+experiment repeats the token version with networks of 600 and 900 neurons, 2 and 3
+times as many; task-complexity's token runs are its first size.
 
 ## Design
 
 The protocol of `../task-complexity`'s token task, one config per arm in `configs/`
 (`n<N>_teacher.toml`, `n<N>_students.toml`, `n<N>_control.toml`), run by
-`jaxley_pytorch.training`. Only the number of neurons N changes:
+`jaxley_pytorch.training`, with one change: the number of neurons N. (The optimizer is
+AdamW without weight decay, which is Adam's update.)
 
 | neurons | excitatory | synapses (about N^2 / 2) | gains and biases per student |
 |---|---|---|---|
 | 300 (`../task-complexity`) | 210 | 45,206 | 600 |
-| 512 | 358 | ~131,000 | 1,024 |
-| 1,024 | 716 | ~524,000 | 2,048 |
-| 2,048 | 1,433 | ~2,100,000 | 4,096 |
+| 600 | 420 | ~180,000 | 1,200 |
+| 900 | 630 | ~405,000 | 1,800 |
 
 * **Network**: the paper's rate network and initialisation at every size: 70% excitatory,
   every ordered pair connected with probability 0.5, weights 2.4 / sqrt(N) * normal + 1 / N
@@ -29,13 +30,13 @@ The protocol of `../task-complexity`'s token task, one config per arm in `config
   dimensions at every size, so the readout's directions are a smaller share of the
   activity space as N grows.
 * **Teachers**: recurrent weights, gains, biases, input and readout maps trained together:
-  25,000 steps of 32 streams x 256 tokens (205M tokens), Adam 3e-3, every tensor's
-  gradient clipped at 1.
+  25,000 steps of 32 streams x 256 tokens (205M tokens), Adam at a peak learning rate
+  of 3e-3, every tensor's gradient clipped at 1.
 * **Students** (ten per size, seeds 1-10): the teacher's gains and biases permuted within
   the excitatory and within the inhibitory neurons, gains halved; only these trained, on
-  the next token (cross-entropy): 10,000 steps (82M tokens), Adam 1e-3, gradient norm
-  clipped at 2. One **control student** per size starts from the teacher's own gains and
-  biases.
+  the next token (cross-entropy): 10,000 steps (82M tokens), Adam at a peak learning
+  rate of 1e-3, gradient norm clipped at 2. One **control student** per size starts from
+  the teacher's own gains and biases.
 * **Learning rate**, every run: linear warmup over the first 5% of the steps (teachers
   1,250, students 500), then linear decay to zero.
 * **Measurements**: as in `../task-complexity`, on 64 validation segments of 256 tokens
@@ -53,20 +54,25 @@ with R <= 0.1, and leaves it degenerate if R >= 0.5. The answer is how R, the pe
 correlation and the split of the error between the readout's directions and the rest
 change with N.
 
+`../sparsity` repeats this experiment with 150 inputs per neuron at every size, which
+separates the size from the fan-in.
+
 ## Running
 
 Outputs go to `/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/network-size`
 (`runs/<experiment_name>/seed<k>/`, `jobs/`, `figures/`; smoke runs under `runs/smoke/` and
 `jobs/smoke/`). Jobs run on a snapshot of the repo
-(`probes/jaxley_pytorch/tools/snapshot.sh`) with `~/myvenv`, one H100 each.
+(`probes/jaxley_pytorch/tools/snapshot.sh`) with `~/myvenv`, one RTX PRO 6000 each (faster than
+an H100 for these float32 networks).
 
 ```bash
-bash submit_smoke.sh  # per size, one H100: every config with --smoke (20 steps); then the summary
+bash submit_smoke.sh  # per size, one GPU: every config with --smoke (20 steps); then the summary
 bash submit.sh        # per size: the teacher, then 10 students and a control; then the summary
 ```
 
 Every run saves a checkpoint every 1,000 steps; a run that stopped early continues with
-its command plus `--resume`. `summarize.py` writes `summary.md` and `summary.json`
-(tables), `training_curves.png` (the paper's Fig. 1c-e, one row per size), `outcomes.png`
+its command plus `--resume`. `summarize.py` reads these runs and, as the 300-neuron size,
+`../task-complexity`'s token runs (`--task-complexity`, its runs directory); it writes
+`summary.md` and `summary.json` (tables), `training_curves.png` (the paper's Fig. 1c-e, one row per size), `outcomes.png`
 (every student's final task loss against its final activity error) and
 `activity_by_size.png` (every student's final activity error against the size).

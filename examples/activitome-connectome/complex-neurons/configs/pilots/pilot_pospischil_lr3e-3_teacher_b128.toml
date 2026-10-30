@@ -1,0 +1,39 @@
+# Pilot (stage 1): pilot_pospischil_lr3e-3_teacher.toml with batch 128 (eval on 256 segments): is the batch the bottleneck?
+experiment_name = "pilot_pospischil_lr3e-3_teacher_b128"
+seeds = [0]
+
+[model]
+name = "pospischil"
+neurons = 1024
+exc_frac = 0.8
+fan_in = 150
+dt = 0.025
+input_scale = 4.0  # 23 Hz at the coupling below
+w_exc = 0.0025  # a quarter of examples/language_modeling's: the strongest tried that is stable at initialisation
+w_inh = 0.0125
+spread = 0.25
+
+[task]
+name = "text"
+data = "/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/data/bpe4096"
+width = 75
+steps_per_token = 200
+chunk = 256
+eval_segments = 256
+eval_burn = 32
+eval_length = 256
+
+[trainer]
+trainable = ["W", "gNa", "gK", "gKm", "gLeak", "bias", "embed", "embed_proj", "read_proj", "unembed", "read_bias"]
+steps = 2000
+warmup_steps = 100
+batch = 128
+lr = 3e-3
+optimizer = "adamw"
+weight_decay = 0.0
+clip = 1.0
+clip_mode = "per_tensor"
+eval_every = 100
+log_every = 10
+dtype = "float32"
+checkpoint_every = 250

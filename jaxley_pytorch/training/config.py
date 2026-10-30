@@ -7,14 +7,17 @@
     experiment_name = "n512_students"  # <output root>/<experiment_name>/seed<k>
     seeds = [1, 2, 3]                  # one run per seed; `--seed` picks it
 
-    [model]    a network drawn from scratch: name = "blk_rate" (`rate_network.BLKRate`)
+    [model]    a network drawn from scratch: name = "blk_rate" (`rate_network.BLKRate`),
+               "pospischil" or "hh" (`spiking_network`)
     [init]     instead of [model]: a trained run's network, the teacher (`InitConfig`)
     [task]     name = "cycling" or "text" (`tasks.Cycling`, `tasks.Text`)
     [trainer]  the training (`TrainerConfig`)
 
 The keys of [model] and [task] are the arguments of the class that `name` selects. Every
-setting that affects a run's results must be written in the file: only keys with a
-default (in `InitConfig` and `TrainerConfig`) may be left out. Unknown keys are errors.
+setting that affects a run's results must be written in the file. Only the keys with a
+default (in `InitConfig` and `TrainerConfig`) may be left out: optional mechanisms that
+are off by default, bookkeeping, and the optimizer (AdamW without weight decay).
+Unknown keys are errors.
 The run directory keeps the file (`config.toml`) and every value the run used
 (`resolved_config.json`).
 """
@@ -27,12 +30,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from jaxley_pytorch.training.init import STARTS
-from jaxley_pytorch.training.rate_network import BLKRate
+from jaxley_pytorch.training.networks import MODELS
 from jaxley_pytorch.training.tasks import TASKS
 
-MODELS = {"blk_rate": BLKRate}
-WEIGHTS = ("W", "g", "b")  # a network's own parameters (a task adds its io_names)
+# A network's own parameters, of every model (a task adds its io_names).
+WEIGHTS = tuple(dict.fromkeys(p for model in MODELS.values() for p in model.PARAMETERS))
 CLIP_MODES = ("global", "per_tensor")
+OPTIMIZERS = ("adamw", "adam")
 DTYPES = ("float32", "float64")
 _TOP_LEVEL = ("experiment_name", "seeds", "model", "init", "task", "trainer")
 
@@ -87,14 +91,19 @@ def _number(value) -> bool:
 
 @dataclass(frozen=True)
 class TrainerConfig:
-    """`[trainer]`: Adam on the parameters in `trainable` ("W", "g", "b" and the task's
-    input and readout weights, its `io_names`), `steps` steps of `batch` trials or text
-    streams. The learning rate `lr` warms up linearly over `warmup_steps` and then
-    decays linearly to zero at the last step. The gradient norm is clipped at `clip`, of
-    all the parameters together (`clip_mode = "global"`) or of every tensor on its own
-    ("per_tensor"). An evaluation every `eval_every` steps (and before and after
-    training), the training loss logged every `log_every`; `dtype` "float32" or
-    "float64".
+    """`[trainer]`: AdamW or Adam on the parameters in `trainable` (the model's own,
+    e.g. "W", "g", "b", and the task's input and readout weights, its `io_names`),
+    `steps` steps of `batch` trials or text streams. The learning rate `lr` warms up
+    linearly over `warmup_steps` and then decays linearly to zero at the last step. The
+    gradient norm is clipped at `clip`, of all the parameters together (`clip_mode =
+    "global"`) or of every tensor on its own ("per_tensor"). An evaluation every
+    `eval_every` steps (and before and after training), the training loss logged every
+    `log_every`; `dtype` "float32" or "float64".
+
+    `optimizer`: "adamw" (the default) or "adam". AdamW's decoupled `weight_decay`
+    (default 0, which makes AdamW's update Adam's) applies to the weights (W and the
+    task's input and readout weights), not to the gains, biases and readout bias
+    (`engine.NO_DECAY`); "adam" takes no weight decay.
 
     Optional: a checkpoint every `checkpoint_every` steps (0: none; `--resume` continues
     from the last one); a time limit of `hours` (0: none); `lbfgs_steps` full-batch
@@ -111,6 +120,8 @@ class TrainerConfig:
     eval_every: int
     log_every: int
     dtype: str
+    optimizer: str = "adamw"
+    weight_decay: float = 0.0
     checkpoint_every: int = 0
     hours: float = 0.0
     lbfgs_steps: int = 0
@@ -160,6 +171,17 @@ class TrainerConfig:
             self.clip_mode,
         )
         _check("trainer", "dtype", self.dtype in DTYPES, f"one of {DTYPES}", self.dtype)
+        _check(
+            "trainer",
+            "optimizer",
+            self.optimizer in OPTIMIZERS,
+            f"one of {OPTIMIZERS}",
+            self.optimizer,
+        )
+        wd = self.weight_decay
+        _check("trainer", "weight_decay", _number(wd) and wd >= 0, ">= 0", wd)
+        if self.optimizer == "adam" and wd:
+            raise ValueError('[trainer] weight_decay goes with optimizer = "adamw"')
         for key in ("compile", "cuda_graph"):
             v = getattr(self, key)
             _check("trainer", key, isinstance(v, bool), "true or false", v)
@@ -182,13 +204,20 @@ class RunConfig:
                 "set either [model] (a network drawn from scratch) or [init] (the "
                 "network of a trained run), not both"
             )
-        valid = WEIGHTS + TASKS[self.task.name].io_names
+        # A student's network is its teacher's, whose model `set_trainable` checks.
+        own = MODELS[self.model.name].PARAMETERS if self.model else WEIGHTS
+        valid = own + TASKS[self.task.name].io_names
         unknown = sorted(set(self.trainer.trainable) - set(valid))
         if unknown:
             raise ValueError(
                 f"[trainer] trainable has unknown parameter(s) {unknown}; the "
                 f"{self.task.name} task's networks have {list(valid)}"
             )
+        if self.model is not None and self.model.name != "blk_rate":
+            if self.task.name != "text":
+                raise ValueError(
+                    "[model] networks of spiking neurons are for the text task"
+                )
         if self.task.name != "cycling":
             if self.init is not None and self.init.stable_start:
                 raise ValueError("[init] stable_start is for the cycling task")

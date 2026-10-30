@@ -113,19 +113,22 @@ character-level language models on Andrej Karpathy's cleaned-up [TinyStories](ht
 
 ## Training networks from config files
 
-`jaxley_pytorch.training` (not part of Jaxley) trains networks of jaxley_pytorch neurons
-on tasks, one TOML config file per arm of an experiment, with a record of every run
-(the config, every value it used, the code's commit):
+`jaxley_pytorch.training` (not part of Jaxley) trains networks on tasks, one TOML config
+file per arm of an experiment, with a record of every run (the config, every value it
+used, the code's commit):
 
 ```bash
 python -m jaxley_pytorch.training --config <arm>.toml --output-root <dir> [--seed k]
 ```
 
-It has the rate network of Beiran & Litwin-Kumar (2025), the cycling task and
-next-token prediction, and teacher-student comparisons; see
+It has the rate network of Beiran & Litwin-Kumar (2025), simulated with the paper's
+update as one matrix product per step (the tests check it against the same network
+simulated in jaxley_pytorch, which is over 100 times slower at 2,048 neurons), the
+cycling task and next-token prediction, and teacher-student comparisons; see
 `jaxley_pytorch/training/__init__.py`. The experiments that use it are in
-`examples/activitome-connectome/`: how much a task (`task-complexity/`) and the size of
-the network (`network-size/`) constrain single-neuron activity given the connectome.
+`examples/activitome-connectome/`: how much a task (`task-complexity/`), the size of the
+network (`network-size/`) and the size at a fixed fan-in (`sparsity/`) constrain
+single-neuron activity given the connectome.
 
 ## Tests
 

@@ -23,6 +23,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+from jaxley_pytorch.training import metrics
 from jaxley_pytorch.training.engine import on_side_stream
 from jaxley_pytorch.training.rate_network import TAU, RateNetwork, Simulator
 
@@ -88,7 +89,11 @@ class Cycling:
         if not (isinstance(train_trials, int) and train_trials >= 0):
             raise ValueError(f"[task] train_trials must be >= 0, got {train_trials!r}")
         self.trials, self.trial_steps = trials, trial_steps
-        self.trials_seed, self.omega, self.train_trials = trials_seed, omega, train_trials
+        self.trials_seed, self.omega, self.train_trials = (
+            trials_seed,
+            omega,
+            train_trials,
+        )
         self.teacher = None
 
     def init_io(self, n: int, rng: np.random.Generator, alpha: float) -> Dict:
@@ -106,7 +111,7 @@ class Cycling:
         """Trials `inputs` (batch, steps, 2) -> readout (batch, steps), rates (batch, n,
         steps) and the final states. Step 0 reads the initial state and step t + 1 the
         state after the update with the input of step t."""
-        params = net.edge_params()
+        params = net.sim_params()
         current = torch.einsum("btc,cn->bnt", inputs, net.io["w_in"])
         steps = inputs.shape[1]
         rates = [net.rates(states["v"][..., None])]
@@ -153,6 +158,9 @@ class Cycling:
         loss = float(((z_t - self.targets) ** 2).mean())
         self.teacher = {"z": z_t, "task_loss": loss}
         return a_t
+
+    def extra_baselines(self) -> Dict:
+        return {}
 
     def next_batch(self):
         idx = self.rng.choice(len(self.pool[0]), self.batch, replace=False)
@@ -272,13 +280,18 @@ class Text:
     examples/activitome-connectome/task-complexity/prepare_tokens.py).
 
     Every token is a constant input current for `steps_per_token` solver steps,
-    `embed_proj @ embed[token]` with a `width`-wide embedding; the logits are
-    `unembed @ (read_proj @ a) + read_bias`, with `a` the rates averaged over the
-    token's window. Training: as many streams through `train.bin` as the batch, `chunk`
-    tokens per step (truncated backpropagation through time; the state carries over
-    from step to step), cross-entropy. Evaluation: `eval_segments` segments spread over
-    `val.bin`, each from rest, `eval_burn` tokens and then `eval_length` measured ones;
-    task loss in bits per token."""
+    `embed_proj @ embed[token]` with a `width`-wide embedding; the logits are `unembed @
+    (read_proj @ a) + read_bias`, with `a` the network's activity (`features`: a rate
+    network's rates) averaged over the token's window. Training: as many streams through
+    `train.bin` as the batch, `chunk` tokens per step (truncated backpropagation through
+    time; the state carries over from step to step; with `bptt_tokens`, the gradient is
+    also cut every `bptt_tokens` tokens inside a chunk, the state still carried over),
+    cross-entropy. Evaluation:
+    `eval_segments` segments spread over `val.bin`, each from rest, `eval_burn` tokens
+    and then `eval_length` measured ones; task loss in bits per token. For a spiking
+    network also its firing rate and, with a teacher, how close its spike counts per
+    token are to the teacher's (next to the teacher's own against a permutation of its
+    neurons, `extra_baselines`)."""
 
     io_names = ("embed", "embed_proj", "read_proj", "unembed", "read_bias")
 
@@ -291,6 +304,7 @@ class Text:
         eval_segments: int,
         eval_burn: int,
         eval_length: int,
+        bptt_tokens: Optional[int] = None,
     ):
         _positive(
             width=width,
@@ -301,6 +315,14 @@ class Text:
         )
         if not (isinstance(eval_burn, int) and eval_burn >= 0):
             raise ValueError(f"[task] eval_burn must be >= 0, got {eval_burn!r}")
+        if bptt_tokens is not None and not (
+            isinstance(bptt_tokens, int) and 1 <= bptt_tokens <= chunk
+        ):
+            raise ValueError(
+                f"[task] bptt_tokens must be an integer from 1 to chunk ({chunk}), "
+                f"got {bptt_tokens!r}"
+            )
+        self.bptt_tokens = bptt_tokens
         self.data, self.width, self.steps_per_token = data, width, steps_per_token
         self.chunk, self.eval_segments = chunk, eval_segments
         self.eval_burn, self.eval_length = eval_burn, eval_length
@@ -324,19 +346,27 @@ class Text:
         q, _ = torch.linalg.qr(net.io["read_proj"].T.detach().double())
         return q
 
-    def _token(self, net: RateNetwork, states: Dict, current: torch.Tensor, params):
+    def _simulate(self, net, states: Dict, current: torch.Tensor, params):
         stim = current[..., None].expand(*current.shape, self.steps_per_token)
-        v, states = net.sim.segment(states, stim, params)
-        return net.rates(v).mean(-1), states
+        return net.sim.segment(states, stim, params)
 
-    def run(self, net: RateNetwork, tokens: torch.Tensor, states: Dict):
-        """`tokens` (batch, K) -> logits (batch, K, vocab), window-mean rates
-        (batch, K, n) and the final states. Every token's simulation is checkpointed."""
-        params = net.edge_params()
+    def _token(self, net, states: Dict, current: torch.Tensor, params):
+        v, states = self._simulate(net, states, current, params)
+        return net.features(v).mean(-1), states
+
+    def run(self, net, tokens: torch.Tensor, states: Dict, spikes: bool = False):
+        """`tokens` (batch, K) -> logits (batch, K, vocab), window-mean activity
+        (batch, K, n) and the final states, and with `spikes` (without gradients, a
+        spiking network) the spike counts (batch, K, n). Every token's simulation is
+        checkpointed; with `bptt_tokens`, the gradient through the states is cut every
+        `bptt_tokens` tokens."""
+        params = net.sim_params()
         currents = net.io["embed"][tokens] @ net.io["embed_proj"].T
-        feats = []
+        feats, counts = [], []
         for k in range(tokens.shape[1]):
             if torch.is_grad_enabled():
+                if self.bptt_tokens and k and k % self.bptt_tokens == 0:
+                    states = {name: s.detach() for name, s in states.items()}
                 a, states = checkpoint(
                     self._token,
                     net,
@@ -345,12 +375,19 @@ class Text:
                     params,
                     use_reentrant=False,
                 )
+            elif spikes:
+                v, after = self._simulate(net, states, currents[:, k], params)
+                a = net.features(v).mean(-1)
+                counts.append(net.spike_counts(states["v"], v))
+                states = after
             else:
                 a, states = self._token(net, states, currents[:, k], params)
             feats.append(a)
         feats = torch.stack(feats, dim=1)
         readout = feats @ net.io["read_proj"].T
         logits = readout @ net.io["unembed"].T + net.io["read_bias"]
+        if spikes:
+            return logits, feats, states, torch.stack(counts, dim=1)
         return logits, feats, states
 
     def prepare(self, sim: Simulator, seed: int, batch: int):
@@ -373,12 +410,19 @@ class Text:
         )
         self.static_states = on_side_stream(lambda: sim.rest_states(batch))
 
-    def set_teacher(self, teacher: RateNetwork) -> torch.Tensor:
+    def set_teacher(self, teacher) -> torch.Tensor:
         """Remember the teacher (its next-token distributions are compared with the
-        student's at every evaluation); returns its rates (segments, tokens, n)."""
-        a_t = self._outputs(teacher, None)["a_s"]
+        student's at every evaluation); returns its activity (segments, tokens, n)."""
+        out = self._outputs(teacher, None)
         self.teacher = teacher
-        return a_t
+        self.spike_baselines = (
+            metrics.spike_baselines(out["c_s"]) if "c_s" in out else {}
+        )
+        return out["a_s"]
+
+    def extra_baselines(self) -> Dict:
+        """The shuffled baselines of the spike counts (a spiking teacher)."""
+        return dict(getattr(self, "spike_baselines", {}))
 
     def next_batch(self):
         self.static_tok.copy_(torch.as_tensor(self.streams.next()))
@@ -394,14 +438,14 @@ class Text:
                 self.static_states[k].copy_(state[k])
 
     @torch.no_grad()
-    def _outputs(self, net: RateNetwork, teacher: Optional[RateNetwork]) -> Dict:
-        """Window-mean rates (segments, tokens after the burn-in, n) of `net` (and
-        `teacher`) on the evaluation segments, every segment from rest, and the summed
+    def _outputs(self, net, teacher) -> Dict:
+        """Window-mean activity (segments, tokens after the burn-in, n) of `net` (and
+        `teacher`) on the evaluation segments, every segment from rest, the summed
         cross-entropies (and KL divergence from the teacher) of the measured tokens
-        (nats)."""
+        (nats), and the spike counts of a spiking network (same shape)."""
         burn, tokens = self.eval_burn, self.eval_tok
         out = {"ce_s": 0.0, "ce_t": 0.0, "kl": 0.0, "count": 0}
-        rates = {"s": [], "t": []}
+        acts, counts = {"s": [], "t": []}, {"s": [], "t": []}
         for i in range(0, tokens.shape[0], self.batch):
             tok = tokens[i : i + self.batch]
             target = tok[:, 1 + burn :].reshape(-1)
@@ -410,24 +454,31 @@ class Text:
                 if model is None:
                     continue
                 rest = model.sim.rest_states(tok.shape[0])
-                logits, feats, _ = self.run(model, tok[:, :-1], rest)
+                spikes = hasattr(model, "spike_counts")
+                result = self.run(model, tok[:, :-1], rest, spikes=spikes)
+                logits, feats = result[0], result[1]
+                if spikes:
+                    counts[name].append(result[3][:, burn:])
                 logp[name] = F.log_softmax(logits[:, burn:].float(), dim=-1)
                 flat = logp[name].reshape(-1, logits.shape[-1])
                 out[f"ce_{name}"] += F.nll_loss(flat, target, reduction="sum").item()
-                rates[name].append(feats[:, burn:])
+                acts[name].append(feats[:, burn:])
             if teacher is not None:
                 out["kl"] += (logp["t"].exp() * (logp["t"] - logp["s"])).sum().item()
             out["count"] += target.numel()
-        for name, r in rates.items():
-            if r:
-                out[f"a_{name}"] = torch.cat(r)
+        for name in ("s", "t"):
+            if acts[name]:
+                out[f"a_{name}"] = torch.cat(acts[name])
+            if counts[name]:
+                out[f"c_{name}"] = torch.cat(counts[name])
         return out
 
     def evaluate(self, net: RateNetwork) -> Tuple[Dict, torch.Tensor]:
         """The task loss of `net` on the evaluation segments (bits per token and per
         character; with a teacher: also the teacher's, and the KL divergence of the
-        next-token distributions from the teacher's, bits per token) and the rates
-        (segments, tokens, n)."""
+        next-token distributions from the teacher's, bits per token; a spiking
+        network's firing rate, and with a teacher its spike counts against the
+        teacher's, `metrics.spike_compare`) and the activity (segments, tokens, n)."""
         ev = self._outputs(net, self.teacher)
         n = ev["count"]
         out = {"task_loss": ev["ce_s"] / n / LN2}
@@ -436,6 +487,12 @@ class Text:
         out["val_bits_per_char"] = out["task_loss"] / self.chars_per_token
         if self.teacher is not None:
             out["output_vs_teacher"] = ev["kl"] / n / LN2
+        if "c_s" in ev:
+            token_s = self.steps_per_token * net.sim.dt / 1000.0
+            out["firing_rate_hz"] = float(ev["c_s"].mean()) / token_s
+            if "c_t" in ev:
+                out["teacher_firing_rate_hz"] = float(ev["c_t"].mean()) / token_s
+                out.update(metrics.spike_compare(ev["c_s"], ev["c_t"]))
         return out, ev["a_s"]
 
     def state_dict(self) -> Dict:

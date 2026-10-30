@@ -1,9 +1,9 @@
-# Students of the 2048-neuron teacher: task-complexity's tokens_students.toml.
-experiment_name = "n2048_students"
+# Students of the 900-neuron, 150-input teacher: task-complexity's tokens_students.toml.
+experiment_name = "n900_students"
 seeds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 [init]
-teacher = "n2048_teacher/seed0"
+teacher = "n900_teacher/seed0"
 start = "shuffled"
 
 [task]
@@ -22,6 +22,8 @@ steps = 10000
 warmup_steps = 500
 batch = 32
 lr = 1e-3
+optimizer = "adamw"
+weight_decay = 0.0
 clip = 2.0
 clip_mode = "global"
 eval_every = 250

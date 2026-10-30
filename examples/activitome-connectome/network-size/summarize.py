@@ -2,7 +2,9 @@
 
 Reads, for every network size N in `--sizes`, the runs of configs/n<N>_teacher.toml,
 n<N>_students.toml and n<N>_control.toml in `--runs` (`n<N>_teacher/seed0`,
-`n<N>_students/seed<k>`, `n<N>_control/seed0`), and writes to `--out`:
+`n<N>_students/seed<k>`, `n<N>_control/seed0`), and with `--task-complexity` (that
+experiment's runs directory) its token runs (`tokens_teacher`, `tokens_students`,
+`tokens_control`, 300 neurons) as the first size; writes to `--out`:
 
   summary.md, summary.json  the tables;
   training_curves.png       the paper's Fig. 1c-e, one row per size;
@@ -14,7 +16,8 @@ Students that did not finish, or ended with a higher task loss than they started
 (their activity ran away), are left out of the statistics and figures and counted
 (`jaxley_pytorch.training.report.excluded`).
 
-Usage: python summarize.py --runs <runs dir> --sizes 512 1024 2048 --out <dir>
+Usage: python summarize.py --runs <runs dir> --sizes 600 1200 \
+           --task-complexity <task-complexity runs dir> --out <dir>
 """
 import argparse
 import glob
@@ -27,7 +30,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from jaxley_pytorch.training.report import (COLORS, INK, INK2, MUTED, SURFACE, excluded, load, spread,
+from jaxley_pytorch.training.report import (COLORS, INK, INK2, MUTED, SURFACE, excluded, load, neurons, spread,
                                             steps_in_thousands, style)
 
 SOLVED = 1.02  # a student solves the task if its task loss is at most this many times the teacher's
@@ -39,14 +42,15 @@ def load_run(run_dir):
     return load(path) if os.path.exists(path) else None
 
 
-def load_size(runs, n):
+def load_size(runs, prefix):
     """Teacher, students that finished without running away, number left out, and control
-    of the size `n` (None for a missing run)."""
-    dirs = sorted(glob.glob(os.path.join(runs, f"n{n}_students", "seed*")))
+    of the runs `<prefix>_teacher`, `<prefix>_students` and `<prefix>_control` in `runs`
+    (None for a missing run)."""
+    dirs = sorted(glob.glob(os.path.join(runs, f"{prefix}_students", "seed*")))
     students = [s for s in map(load_run, dirs) if s is not None]
     kept = [s for s in students if not excluded(s)]
-    teacher = load_run(os.path.join(runs, f"n{n}_teacher", "seed0"))
-    control = load_run(os.path.join(runs, f"n{n}_control", "seed0"))
+    teacher = load_run(os.path.join(runs, f"{prefix}_teacher", "seed0"))
+    control = load_run(os.path.join(runs, f"{prefix}_control", "seed0"))
     return teacher, kept, len(dirs) - len(kept), control
 
 
@@ -182,17 +186,22 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", required=True)
     parser.add_argument("--sizes", nargs="+", type=int, required=True)
+    parser.add_argument("--task-complexity", help="task-complexity's runs directory (its token runs: 300 neurons)")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
+    arms = [(args.runs, f"n{n}") for n in args.sizes]
+    if args.task_complexity:
+        arms.append((args.task_complexity, "tokens"))
     sizes = {}
-    for n in sorted(args.sizes):
-        teacher, kept, n_excluded, control = load_size(args.runs, n)
+    for runs, prefix in arms:
+        teacher, kept, n_excluded, control = load_size(runs, prefix)
         if teacher is None:
-            print(f"{n} neurons: no teacher result, left out", flush=True)
+            print(f"{os.path.join(runs, prefix)}: no teacher result, left out", flush=True)
             continue
-        sizes[n] = (teacher, kept, n_excluded, control)
+        sizes[neurons(teacher)] = (teacher, kept, n_excluded, control)
+    sizes = dict(sorted(sizes.items()))
 
     summary, teacher_rows, student_rows = {}, [], []
     for n, (teacher, kept, n_excluded, control) in sizes.items():

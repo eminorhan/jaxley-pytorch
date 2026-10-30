@@ -1,0 +1,40 @@
+# Pilot (stage 1): pilot_hh_lr3e-3_teacher.toml with a surrogate gradient (the sodium activation's voltage derivative x 0.1 in the backward pass).
+experiment_name = "pilot_hh_lr3e-3_teacher_surrogate0.1"
+seeds = [0]
+
+[model]
+name = "hh"
+neurons = 1024
+exc_frac = 0.8
+fan_in = 150
+dt = 0.025
+input_scale = 6.0
+w_exc = 0.002  # a tenth of examples/language_modeling's: gradients flat over the 256-token chunk at initialisation
+w_inh = 0.01
+spread = 0.25
+na_activation_gradient = 0.1  # surrogate gradient (1: exact); the simulation is unchanged
+
+[task]
+name = "text"
+data = "/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/data/bpe4096"
+width = 75
+steps_per_token = 200
+chunk = 256
+eval_segments = 64
+eval_burn = 32
+eval_length = 256
+
+[trainer]
+trainable = ["W", "gNa", "gK", "gLeak", "bias", "embed", "embed_proj", "read_proj", "unembed", "read_bias"]
+steps = 2000
+warmup_steps = 100
+batch = 32
+lr = 3e-3
+optimizer = "adamw"
+weight_decay = 0.0
+clip = 1.0
+clip_mode = "per_tensor"
+eval_every = 100
+log_every = 10
+dtype = "float32"
+checkpoint_every = 250

@@ -1,10 +1,10 @@
-# The teacher of 512 neurons: task-complexity's tokens_teacher.toml with neurons = 512.
-experiment_name = "n512_teacher"
+# The teacher of 900 neurons: task-complexity's tokens_teacher.toml with neurons = 900 (AdamW without weight decay = its Adam).
+experiment_name = "n900_teacher"
 seeds = [0]
 
 [model]
 name = "blk_rate"
-neurons = 512
+neurons = 900
 exc_frac = 0.7
 connection_prob = 0.5
 dt = 0.5
@@ -25,6 +25,8 @@ steps = 25000
 warmup_steps = 1250
 batch = 32
 lr = 3e-3
+optimizer = "adamw"
+weight_decay = 0.0
 clip = 1.0
 clip_mode = "per_tensor"
 eval_every = 1000

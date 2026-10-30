@@ -1,9 +1,9 @@
-# Control: a student of the 512-neuron teacher that starts from the teacher's own gains and biases.
-experiment_name = "n512_control"
+# Control: a student of the 600-neuron teacher that starts from the teacher's own gains and biases (as tokens_control.toml).
+experiment_name = "n600_control"
 seeds = [0]
 
 [init]
-teacher = "n512_teacher/seed0"
+teacher = "n600_teacher/seed0"
 start = "teacher"
 
 [task]
@@ -22,6 +22,8 @@ steps = 10000
 warmup_steps = 500
 batch = 32
 lr = 1e-3
+optimizer = "adamw"
+weight_decay = 0.0
 clip = 2.0
 clip_mode = "global"
 eval_every = 250

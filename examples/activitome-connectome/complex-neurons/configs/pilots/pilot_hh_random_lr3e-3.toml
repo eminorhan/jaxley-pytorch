@@ -1,0 +1,32 @@
+# Pilot (stage 1): a student of pilot_hh_lr3e-3_teacher from random single-neuron parameters, peak lr 3e-3, 2,000 steps.
+experiment_name = "pilot_hh_random_lr3e-3"
+seeds = [1]
+
+[init]
+teacher = "pilot_hh_lr3e-3_teacher/seed0"
+start = "random"
+
+[task]
+name = "text"
+data = "/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/data/bpe4096"
+width = 75
+steps_per_token = 200
+chunk = 256
+eval_segments = 64
+eval_burn = 32
+eval_length = 256
+
+[trainer]
+trainable = ["gNa", "gK", "gLeak", "bias"]
+steps = 2000
+warmup_steps = 100
+batch = 32
+lr = 3e-3
+optimizer = "adamw"
+weight_decay = 0.0
+clip = 2.0
+clip_mode = "global"
+eval_every = 100
+log_every = 10
+dtype = "float32"
+checkpoint_every = 250
