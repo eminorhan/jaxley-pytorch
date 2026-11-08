@@ -28,7 +28,12 @@ A neuron's single-neuron parameters are the maximal conductances of its channels
 trained as their logarithms (they span orders of magnitude), and a bias current. The
 teacher's conductances are drawn around the defaults of its type (log-normal with
 standard deviation `spread`); its biases start at 0. The task's input current, times
-`input_scale`, and the bias are densities (uA/cm^2). The activity a task reads is every
+`input_scale`, and the bias are densities (uA/cm^2). With `cell_types` = K, the neurons
+belong to K cell types that share their single-neuron parameters: the excitatory
+neurons in K / 2 contiguous groups of (nearly) equal size, the inhibitory ones likewise
+(`cell_types`); the network keeps one value of every parameter per type (the teacher's
+drawn as a neuron's are) and gives it to the type's neurons (`SpikingNetwork.
+neuron_params`), and a student knows the types. The activity a task reads is every
 neuron's voltage, centred at -60 mV and scaled by 20 mV (`SpikingNetwork.features`);
 spikes are upward crossings of 0 mV (`SpikingNetwork.spike_counts`).
 
@@ -117,9 +122,11 @@ class SpikingModel:
     with a time step of `dt` ms; `input_scale` (uA/cm^2 per unit of the task's input),
     `w_exc` and `w_inh` (mS/cm^2 per synapse at a fan-in of 100), `spread` (of the
     teacher's log conductances), `release_width` (mV, the slope of the synapses'
-    transmitter release around -20 mV) and `na_activation_gradient` (from 0 to 1: the
+    transmitter release around -20 mV), `na_activation_gradient` (from 0 to 1: the
     derivative with which the sodium activation gate reads the voltage in the backward
-    pass; 1 is the exact gradient, below 1 a surrogate, see the module's docstring)."""
+    pass; 1 is the exact gradient, below 1 a surrogate, see the module's docstring) and
+    `cell_types` (an even number of cell types that share their single-neuron
+    parameters, half of them excitatory; by default every neuron has its own)."""
 
     name = ""
     PARAMETERS: Tuple[str, ...] = ()
@@ -136,6 +143,7 @@ class SpikingModel:
         spread: float,
         release_width: float = DELTA,
         na_activation_gradient: float = 1.0,
+        cell_types: Optional[int] = None,
     ):
         if not (isinstance(neurons, int) and neurons >= 2):
             raise ValueError(
@@ -166,10 +174,32 @@ class SpikingModel:
                 "[model] na_activation_gradient must be from 0 to 1, got "
                 f"{na_activation_gradient!r}"
             )
+        if cell_types is not None and not (
+            isinstance(cell_types, int)
+            and cell_types >= 2
+            and cell_types % 2 == 0
+            and cell_types // 2 <= min(self.n_exc, neurons - self.n_exc)
+        ):
+            raise ValueError(
+                "[model] cell_types must be an even integer >= 2, at most twice the "
+                f"number of neurons of each class, got {cell_types!r}"
+            )
         self.dt, self.input_scale = dt, input_scale
         self.w_exc, self.w_inh, self.spread = w_exc, w_inh, spread
         self.release_width = release_width
         self.na_activation_gradient = float(na_activation_gradient)
+        self.cell_types = cell_types
+
+    @property
+    def units(self) -> int:
+        """The number of values of a single-neuron parameter that all neurons have: one
+        per cell type, or one per neuron."""
+        return self.cell_types or self.neurons
+
+    @property
+    def exc_units(self) -> int:
+        """... of those, the excitatory neurons' (or types')."""
+        return self.cell_types // 2 if self.cell_types else self.n_exc
 
     @property
     def n_exc(self) -> int:
@@ -193,6 +223,8 @@ class SpikingModel:
             "spread": self.spread,
             "release_width": self.release_width,
             "na_activation_gradient": self.na_activation_gradient,
+            # (recorded only when set: networks without cell types keep their settings)
+            **({"cell_types": self.cell_types} if self.cell_types else {}),
         }
 
 
@@ -273,15 +305,30 @@ def _point_cell(channels, values: Dict, na_activation_gradient: float = 1.0) -> 
     return cell
 
 
+def cell_types(model: SpikingModel) -> Optional[np.ndarray]:
+    """Every neuron's cell type with `cell_types` = K (None without): the excitatory
+    neurons in K / 2 contiguous groups of (nearly) equal size, types 0 to K / 2 - 1, the
+    inhibitory ones likewise, K / 2 to K - 1."""
+    if not model.cell_types:
+        return None
+    half, n, n_exc = model.cell_types // 2, model.neurons, model.n_exc
+    types = np.empty(n, dtype=np.int64)
+    for first, neurons in ((0, np.arange(n_exc)), (half, np.arange(n_exc, n))):
+        for t, group in enumerate(np.array_split(neurons, half)):
+            types[group] = first + t
+    return types
+
+
 def default_conductances(model: SpikingModel) -> Dict[str, np.ndarray]:
-    """Every trainable conductance's value of its type, for the neurons that have it."""
+    """Every trainable conductance's value of its class (excitatory or inhibitory), for
+    the neurons that have it, or with cell types for the types that have it."""
     (_, exc), (_, inh) = CELLS[model.name]
-    n, n_exc = model.neurons, model.n_exc
+    units, exc_units = model.units, model.exc_units
     out = {}
     for name, (key, exc_only) in CONDUCTANCES[model.name].items():
-        values = np.full(n, exc[key], dtype=float)
-        values[n_exc:] = inh.get(key, np.nan)
-        out[name] = values[:n_exc] if exc_only else values
+        values = np.full(units, exc[key], dtype=float)
+        values[exc_units:] = inh.get(key, np.nan)
+        out[name] = values[:exc_units] if exc_only else values
     return out
 
 
@@ -347,6 +394,17 @@ class SpikingSimulator:
         self.w_scale = torch.as_tensor(scale * PER_DENSITY, device=device, dtype=dtype)
         self.real = torch.ones(len(pre))  # every synapse is real (no padding)
         self._template = {}
+        # With cell types: which value of every single-neuron parameter each neuron
+        # (that has it) reads, its type's (None: every neuron its own).
+        types = cell_types(model)
+        self.unit_of = None
+        if types is not None:
+            t = torch.as_tensor(types, device=device)
+            self.unit_of = {
+                cond: t[: self.n_exc] if exc_only else t
+                for cond, (_, exc_only) in CONDUCTANCES[model.name].items()
+            }
+            self.unit_of["bias"] = t
 
     def params(
         self, W: torch.Tensor, log_g: Dict[str, torch.Tensor], bias: torch.Tensor
@@ -399,9 +457,9 @@ class SpikingSimulator:
 
 class SpikingNetwork(nn.Module):
     """One network: weights `W` (per synapse), log conductances `log_g` and biases
-    `bias` (per neuron), and a task's input and readout weights `io`, simulated by `sim`,
-    which a teacher shares with its students. No parameter requires gradients until
-    `set_trainable`."""
+    `bias` (per neuron, or per cell type: `SpikingModel`), and a task's input and
+    readout weights `io`, simulated by `sim`, which a teacher shares with its students.
+    No parameter requires gradients until `set_trainable`."""
 
     def __init__(self, sim: SpikingSimulator, W, log_g: Dict, bias, io: Dict):
         super().__init__()
@@ -455,12 +513,17 @@ class SpikingNetwork(nn.Module):
         return (above[..., 1:] & ~above[..., :-1]).sum(-1).to(v.dtype)
 
     def neuron_params(self) -> Dict[str, torch.Tensor]:
-        """The single-neuron parameters as they are compared with a teacher's."""
-        return {**self.log_g, "bias": self.bias}
+        """The single-neuron parameters of every neuron (that has them), as they are
+        simulated and compared with a teacher's: with cell types, its type's values."""
+        own = {**self.log_g, "bias": self.bias}
+        if self.sim.unit_of is None:
+            return own
+        return {name: v[self.sim.unit_of[name]] for name, v in own.items()}
 
     def sim_params(self):
         """What `self.sim.segment` takes for this network's parameters."""
-        return self.sim.params(self.W, dict(self.log_g), self.bias)
+        p = self.neuron_params()
+        return self.sim.params(self.W, {k: p[k] for k in self.log_g}, p["bias"])
 
 
 def new_network(
@@ -472,9 +535,9 @@ def new_network(
     compile: bool,
 ) -> Tuple[SpikingNetwork, Dict]:
     """The initial network for `seed`: connectivity, weights (softplus(W) log-normal
-    around 1), log conductances around the defaults of every type, biases 0, and the
-    input and readout weights that `init_io(n, rng, alpha)` draws from the same random
-    generator after them."""
+    around 1), log conductances around the defaults of every class (per neuron, or per
+    cell type), biases 0, and the input and readout weights that `init_io(n, rng,
+    alpha)` draws from the same random generator after them."""
     rng = np.random.default_rng(seed)
     n, n_exc = model.neurons, model.n_exc
     pre, post = sample_connectivity(n, n_exc, model.fan_in, model.k_exc, rng)
@@ -495,11 +558,13 @@ def new_network(
     t0 = time.time()
     sim = SpikingSimulator(model, conn, device, dtype, compile)
     print(
-        f"network: {n} {model.name} neurons ({n_exc} excitatory), {len(pre):,} synapses "
-        f"({model.fan_in} per neuron), built in {time.time() - t0:.1f} s",
+        f"network: {n} {model.name} neurons ({n_exc} excitatory"
+        + (f"; {model.cell_types} cell types" if model.cell_types else "")
+        + f"), {len(pre):,} synapses ({model.fan_in} per neuron), built in "
+        f"{time.time() - t0:.1f} s",
         flush=True,
     )
-    return SpikingNetwork(sim, W, log_g, np.zeros(n), io), conn
+    return SpikingNetwork(sim, W, log_g, np.zeros(model.units), io), conn
 
 
 def load_network(
@@ -526,30 +591,41 @@ def make_student(
 ) -> SpikingNetwork:
     """A network with the teacher's weights, inputs and readout and the single-neuron
     parameters of `start`: "shuffled" (the teacher's, every parameter permuted within
-    the excitatory and within the inhibitory neurons, drawn with `seed`), "random" (new
-    draws from the teacher's initial distribution with `seed`: log conductances around
-    the defaults of every type, biases 0), "teacher" (its own) or "student" (those of
-    the trained student in `student_dir`)."""
-    values = {
+    the excitatory and within the inhibitory neurons, drawn with `seed`; with cell
+    types, among the types of the same class, so that no type keeps its own value),
+    "random" (new draws from the teacher's initial distribution with `seed`: log
+    conductances around the defaults of every class, biases 0), "teacher" (its own) or
+    "student" (those of the trained student in `student_dir`)."""
+    values = {  # one value per neuron, or per cell type
         name: p.detach().cpu().double().numpy().copy()
-        for name, p in teacher.neuron_params().items()
+        for name, p in {**teacher.log_g, "bias": teacher.bias}.items()
     }
     rng = np.random.default_rng(seed)
-    n, n_exc = int(conn["n"]), int(conn["n_exc"])
+    model = teacher.sim.model
+    units, exc_units = model.units, model.exc_units
     if start == "shuffled":
         for v in values.values():
             parts = (
-                (slice(0, n_exc), slice(n_exc, None)) if len(v) == n else (slice(None),)
+                (slice(0, exc_units), slice(exc_units, None))
+                if len(v) == units
+                else (slice(None),)
             )
             for part in parts:
-                v[part] = rng.permutation(v[part])
+                perm = rng.permutation(len(v[part]))
+                if model.cell_types and len(perm) < 2:
+                    raise ValueError(
+                        '[init] start = "shuffled" needs at least two cell types of '
+                        "each class"
+                    )
+                while model.cell_types and np.any(perm == np.arange(len(perm))):
+                    perm = rng.permutation(len(perm))  # a type never keeps its value
+                v[part] = v[part][perm]
     elif start == "random":
-        model = teacher.sim.model
         values = {
             name: np.log(v) + model.spread * rng.standard_normal(len(v))
             for name, v in default_conductances(model).items()
         }
-        values["bias"] = np.zeros(n)
+        values["bias"] = np.zeros(units)
     elif start == "student":
         path = os.path.join(student_dir, "student.pt")
         st = torch.load(path, map_location="cpu", weights_only=True)

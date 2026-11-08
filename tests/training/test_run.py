@@ -37,7 +37,6 @@ TEXT = """
 [task]
 name = "text"
 data = "{data}"
-width = 4
 steps_per_token = 2
 chunk = 4
 eval_segments = 4
@@ -61,7 +60,7 @@ cuda_graph = false
 """
 TEACHER = '["W", "g", "b", "w_out"]'
 TEXT_TEACHER = (
-    '["W", "g", "b", "embed", "embed_proj", "read_proj", "unembed", "read_bias"]'
+    '["W", "g", "b", "embed", "unembed", "read_bias"]'
 )
 
 
@@ -142,10 +141,71 @@ def text_data(tmp_path):
     return d
 
 
+def test_text_io(text_data):
+    """A standard language model's input and readout: an input current per token and
+    neuron, and a linear readout of every neuron (its directions span min(neurons,
+    vocabulary))."""
+    kwargs = dict(steps_per_token=3, chunk=6, eval_segments=2, eval_burn=1)
+    task = Text(str(text_data), eval_length=3, **kwargs)
+    model = BLKRate(20, 0.7, dt=0.5, connection_prob=0.5)
+    net, _ = networks.new_network(
+        model, task.init_io, 0, torch.device("cpu"), torch.float64, False
+    )
+    assert set(net.io) == {"embed", "unembed", "read_bias"}
+    assert net.io["embed"].shape == net.io["unembed"].shape == (12, 20)
+    assert task.readout_basis(net).shape == (20, 12)  # 12 tokens, 20 neurons
+    task.prepare(net.sim, 0, 2)
+    task.next_batch()
+    with torch.no_grad():
+        logits, feats, _ = task.run(
+            net, task.static_tok[:, :4], net.sim.rest_states(2)
+        )
+    expected = feats @ net.io["unembed"].T + net.io["read_bias"]
+    assert torch.allclose(logits, expected)
+
+
+def test_read_bias_starts_at_unigram(text_data):
+    """The readout bias starts at the log frequencies of the training tokens (add-one
+    smoothed, centred), so the network starts out predicting them."""
+    kwargs = dict(steps_per_token=3, chunk=6, eval_segments=2, eval_burn=1)
+    task = Text(str(text_data), eval_length=3, **kwargs)
+    tokens = np.fromfile(text_data / "train.bin", dtype=np.uint8)
+    freq = (np.bincount(tokens, minlength=12) + 1.0) / (len(tokens) + 12)
+    bias = task.init_io(20, np.random.default_rng(0), 0.05)["read_bias"]
+    assert np.allclose(bias, np.log(freq) - np.log(freq).mean())
+    assert np.allclose(np.exp(bias) / np.exp(bias).sum(), freq)
+
+
+def test_readout_norm(text_data):
+    """readout_norm = "rms": the readout reads the activity divided by its root mean
+    square over the neurons; the activity itself (what the task returns) is unchanged."""
+    kwargs = dict(steps_per_token=3, chunk=6, eval_segments=2, eval_burn=1)
+    plain = Text(str(text_data), eval_length=3, **kwargs)
+    normed = Text(str(text_data), eval_length=3, readout_norm="rms", **kwargs)
+    model = BLKRate(20, 0.7, dt=0.5, connection_prob=0.5)
+    net, _ = networks.new_network(
+        model, plain.init_io, 0, torch.device("cpu"), torch.float64, False
+    )
+    out = {}
+    for name, task in (("plain", plain), ("normed", normed)):
+        task.prepare(net.sim, 0, 2)
+        task.next_batch()
+        with torch.no_grad():
+            out[name] = task.run(net, task.static_tok[:, :4], net.sim.rest_states(2))
+    feats = out["plain"][1]
+    assert torch.equal(out["normed"][1], feats)
+    rms = torch.sqrt((feats**2).mean(-1, keepdim=True) + 1e-6)
+    expected = (feats / rms) @ net.io["unembed"].T + net.io["read_bias"]
+    assert torch.allclose(out["normed"][0], expected)
+    assert not torch.allclose(out["normed"][0], out["plain"][0])
+    with pytest.raises(ValueError, match="readout_norm must be"):
+        Text(str(text_data), eval_length=3, readout_norm="layer", **kwargs)
+
+
 def test_bptt_tokens(text_data):
     """bptt_tokens cuts the gradient through the states every bptt_tokens tokens: the
     same loss, a different gradient (the full one at bptt_tokens = chunk)."""
-    kwargs = dict(width=4, steps_per_token=3, chunk=6, eval_segments=2, eval_burn=1)
+    kwargs = dict(steps_per_token=3, chunk=6, eval_segments=2, eval_burn=1)
     task = Text(str(text_data), eval_length=3, **kwargs)
     model = BLKRate(20, 0.7, dt=0.5, connection_prob=0.5)
     net, _ = networks.new_network(
@@ -189,6 +249,13 @@ def test_text(tmp_path, text_data):
             "other",
             head("other") + init() + other + trainer('["g", "b"]', batch=2),
         )
+    normed = text + 'readout_norm = "rms"\n'  # the teacher read out without the norm
+    with pytest.raises(SystemExit, match="readout_norm is 'rms', but the teacher"):
+        run(
+            tmp_path,
+            "normed",
+            head("normed") + init() + normed + trainer('["g", "b"]', batch=2),
+        )
 
 
 def test_refuse_and_resume(tmp_path):
@@ -225,17 +292,19 @@ w_inh = 0.05
 spread = 0.25
 """
 SPIKING_TEACHER = (
-    '["W", "gNa", "gK", "gKm", "gLeak", "bias", "embed", "embed_proj", "read_proj", '
-    '"unembed", "read_bias"]'
+    '["W", "gNa", "gK", "gKm", "gLeak", "bias", "embed", "unembed", "read_bias"]'
 )
 NEURON_PARAMS = '["gNa", "gK", "gKm", "gLeak", "bias"]'
 
 
-def test_spiking_text(tmp_path, text_data):
-    """A spiking teacher and student: firing rates, spike counts against the teacher's,
-    an error and a shuffled baseline for every single-neuron parameter."""
+@pytest.mark.parametrize("cell_types", [None, 4])
+def test_spiking_text(tmp_path, text_data, cell_types):
+    """A spiking teacher and student (also with cell types that share the single-neuron
+    parameters): firing rates, spike counts against the teacher's, an error and a
+    shuffled baseline for every single-neuron parameter."""
     text = TEXT.format(data=text_data)
-    teacher = head("teacher") + SPIKING + text + trainer(SPIKING_TEACHER, batch=2)
+    model = SPIKING + (f"cell_types = {cell_types}\n" if cell_types else "")
+    teacher = head("teacher") + model + text + trainer(SPIKING_TEACHER, batch=2)
     r = result(run(tmp_path, "teacher", teacher))
     assert np.isfinite(r["final"]["task_loss"]) and r["final"]["firing_rate_hz"] >= 0
     assert r["neurons"] == 10 and r["synapses"] == 50 and r["k"] == 5
@@ -255,3 +324,4 @@ def test_spiking_text(tmp_path, text_data):
         assert r["baselines"][key] >= 0, key
     saved = torch.load(out / "student.pt", weights_only=True)
     assert set(saved) >= {"gNa", "gK", "gKm", "gLeak", "bias"}
+    assert saved["bias"].shape == ((cell_types or 10),)

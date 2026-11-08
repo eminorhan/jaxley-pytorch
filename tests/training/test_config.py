@@ -43,7 +43,6 @@ TEXT = """
 [task]
 name = "text"
 data = "/no/such/dir"
-width = 4
 steps_per_token = 2
 chunk = 4
 eval_segments = 4
@@ -114,6 +113,15 @@ def test_model_or_init(tmp_path):
     bad = INIT.replace('start = "shuffled"', 'start = "shuffled"\nstable_start = true')
     with pytest.raises(ValueError, match="stable_start"):
         load(tmp_path, HEAD + bad + CYCLING + TRAINER)
+
+
+def test_gain_scale(tmp_path):
+    """`[init] gain_scale`: 1 by default, positive."""
+    assert load(tmp_path, HEAD + INIT + CYCLING + TRAINER).init.gain_scale == 1.0
+    half = INIT.replace('start = "shuffled"', 'start = "random"\ngain_scale = 0.5')
+    assert load(tmp_path, HEAD + half + CYCLING + TRAINER).init.gain_scale == 0.5
+    with pytest.raises(ValueError, match="gain_scale must be positive"):
+        load(tmp_path, HEAD + half.replace("0.5", "0.0") + CYCLING + TRAINER)
 
 
 def test_fan_in(tmp_path):

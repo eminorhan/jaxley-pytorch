@@ -59,12 +59,15 @@ class InitConfig:
     (`init.STARTS`: "shuffled", "random", "uniform", "teacher" or "student"; for
     "student", `student` is a trained student's run directory, in which `{seed}` stands
     for the run's seed). `stable_start` (cycling; random or uniform starts): draw the
-    start again while its activity runs away (`init.stable_student`)."""
+    start again while its activity runs away (`init.stable_student`). `gain_scale`
+    (rate networks): the start's gains are multiplied by it (the shuffled start's are
+    halved already)."""
 
     teacher: str
     start: str
     student: str = ""
     stable_start: bool = False
+    gain_scale: float = 1.0
 
     def __post_init__(self):
         if self.start not in STARTS:
@@ -78,6 +81,10 @@ class InitConfig:
             )
         if self.stable_start and self.start not in ("random", "uniform"):
             raise ValueError('[init] stable_start is for start = "random" or "uniform"')
+        if not self.gain_scale > 0:
+            raise ValueError(
+                f"[init] gain_scale must be positive, got {self.gain_scale!r}"
+            )
 
 
 def _check(section: str, key: str, ok: bool, what: str, value):

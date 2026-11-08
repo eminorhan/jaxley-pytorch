@@ -14,6 +14,8 @@ gains and biases (of a spiking network: its single-neuron parameters, see
   teacher   the teacher's own (a control: how far training alone moves a network away
             from the teacher);
   student   those of a trained student (its run directory).
+
+`[init] gain_scale` multiplies the start's gains (rate networks only).
 """
 
 import math
@@ -41,6 +43,8 @@ def make_student(
     of `start` (drawn with `seed`), the gains then multiplied by `gain_scale`. A spiking
     teacher's students start as `spiking_network.make_student` says."""
     if isinstance(teacher, spiking_network.SpikingNetwork):
+        if gain_scale != 1.0:
+            raise ValueError("[init] gain_scale is for rate networks (gains)")
         return spiking_network.make_student(teacher, conn, start, seed, student_dir)
     g = teacher.g.detach().cpu().double().numpy().copy()
     b = teacher.b.detach().cpu().double().numpy().copy()
@@ -71,13 +75,14 @@ def stable_student(
     seed: int,
     start_loss: Callable[[RateNetwork], float],
     silent_loss: float,
+    gain_scale: float = 1.0,
 ) -> Tuple[RateNetwork, Dict]:
-    """A `random` or `uniform` start, drawn again (seed + 1,000 x attempt; uniform: the
-    gains x 0.9 per attempt) while its task loss `start_loss(net)` is not finite or
-    above 10 times `silent_loss`, the loss of a silent readout: its activity runs away.
-    Returns the network and {"redraws", "start_loss"}."""
+    """A `random` or `uniform` start (its gains times `gain_scale`), drawn again (seed +
+    1,000 x attempt; uniform: the gains x 0.9 per attempt) while its task loss
+    `start_loss(net)` is not finite or above 10 times `silent_loss`, the loss of a silent
+    readout: its activity runs away. Returns the network and {"redraws", "start_loss"}."""
     attempt = 0
-    net = make_student(teacher, conn, start, seed)
+    net = make_student(teacher, conn, start, seed, gain_scale=gain_scale)
     while True:
         loss = start_loss(net)
         if math.isfinite(loss) and loss < 10 * silent_loss:
@@ -90,5 +95,5 @@ def stable_student(
             )
         scale = 0.9**attempt if start == "uniform" else 1.0
         net = make_student(
-            teacher, conn, start, seed + 1000 * attempt, gain_scale=scale
+            teacher, conn, start, seed + 1000 * attempt, gain_scale=gain_scale * scale
         )

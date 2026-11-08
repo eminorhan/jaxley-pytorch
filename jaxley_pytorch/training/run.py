@@ -48,8 +48,10 @@ from jaxley_pytorch.training.config import Component, RunConfig, load_config
 from jaxley_pytorch.training.tasks import TASKS
 
 REPO = Path(jaxley_pytorch.__file__).resolve().parent.parent
-# What a student's [task] must share with its teacher's (the rest may differ).
-SAME_AS_TEACHER = {"cycling": (), "text": ("data", "width", "steps_per_token")}
+# What a student's [task] must share with its teacher's (the rest may differ), and the
+# defaults of the optional ones (a run that does not record them used the default).
+SAME_AS_TEACHER = {"cycling": (), "text": ("data", "steps_per_token", "readout_norm")}
+TASK_DEFAULTS = {"readout_norm": None}
 
 
 def pick_seed(cfg: RunConfig, seed: Optional[int]) -> int:
@@ -96,14 +98,15 @@ def check_task(teacher_task: Dict, task: Component):
             f"{teacher_task['name']!r}"
         )
     for key in SAME_AS_TEACHER[task.name]:
-        if key in teacher_task:
-            mine, theirs = task.kwargs[key], teacher_task[key]
+        if key in teacher_task or key in TASK_DEFAULTS:
+            mine = task.kwargs.get(key, TASK_DEFAULTS.get(key))
+            theirs = teacher_task.get(key, TASK_DEFAULTS.get(key))
             if key == "data":
                 mine, theirs = os.path.normpath(mine), os.path.normpath(theirs)
             if mine != theirs:
                 raise SystemExit(
-                    f"[task] {key} is {task.kwargs[key]!r}, but the teacher was "
-                    f"trained with {teacher_task[key]!r}"
+                    f"[task] {key} is {mine!r}, but the teacher was trained with "
+                    f"{theirs!r}"
                 )
 
 
@@ -258,11 +261,14 @@ def train(
                 seed,
                 lambda candidate: task.evaluate(candidate)[0]["task_loss"],
                 task.silent_loss(),
+                cfg.init.gain_scale,
             )
             print(json.dumps({"start": start}), flush=True)
         else:
             student = cfg.init.student and str(run_path(root, cfg.init.student, seed))
-            net = init.make_student(teacher, conn, cfg.init.start, seed, student)
+            net = init.make_student(
+                teacher, conn, cfg.init.start, seed, student, cfg.init.gain_scale
+            )
     params = net.set_trainable(t.trainable)
     named = [(n, p) for n, p in net.named_weights() if p.requires_grad]
 

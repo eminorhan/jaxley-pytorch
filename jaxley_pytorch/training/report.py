@@ -1,11 +1,13 @@
 # This file is part of jaxley-pytorch, a PyTorch port of Jaxley, a differentiable
 # neuroscience simulator. Jaxley is licensed under the Apache License Version 2.0, see
 # <https://www.apache.org/licenses/>
-"""What the experiments' summary scripts share: reading runs' `result.json`, the rule
-for leaving a run out, and the style of the figures (the dataviz reference palette:
+"""What the experiments' summary scripts share: reading runs' `result.json`, finding a
+teacher's run, the rule for leaving a run out, and the style of the figures (the dataviz reference palette:
 categorical slots 1-3 and the chart ink)."""
 
+import glob
 import json
+import os
 
 import matplotlib
 import matplotlib.ticker
@@ -20,6 +22,15 @@ COLORS = {"shuffled": "#2a78d6", "random": "#eb6834", "control": "#1baf7a"}
 def load(path: str) -> dict:
     with open(path) as f:
         return json.load(f)
+
+
+def teacher_run(runs: str, name: str) -> str:
+    """The run directory of the teacher `<name>_teacher/seed<k>` in `runs` (a teacher
+    is trained for one seed, not always seed 0); seed 0's if there is none."""
+    dirs = sorted(glob.glob(os.path.join(runs, f"{name}_teacher", "seed*")))
+    if len(dirs) > 1:
+        raise ValueError(f"{len(dirs)} {name} teachers in {runs}, expected one")
+    return dirs[0] if dirs else os.path.join(runs, f"{name}_teacher", "seed0")
 
 
 def excluded(result: dict) -> bool:

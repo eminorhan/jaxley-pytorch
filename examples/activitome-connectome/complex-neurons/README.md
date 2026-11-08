@@ -2,10 +2,9 @@
 
 `../task-complexity`, `../network-size` and `../sparsity` ask, with the rate network of
 Beiran & Litwin-Kumar (2025), whether a task constrains single-neuron activity given the
-connectome: students that share a teacher's synaptic weights and learn only its
-single-neuron parameters (gains and biases) recover the teacher's activity on
-next-token prediction, at every size and fan-in tried, but not its gains and biases.
-This experiment asks the same with biophysical neurons, on the same token task.
+connectome: students share a teacher's synaptic weights and learn only its single-neuron
+parameters (gains and biases) from next-token prediction. This experiment asks the same
+with biophysical neurons, on the same token task.
 
 ## Design
 
@@ -42,8 +41,14 @@ This experiment asks the same with biophysical neurons, on the same token task.
   Hodgkin-Huxley neuron. The teacher's conductances start around the defaults of its
   type (log-normal, standard deviation 0.25), its biases at 0.
 * **Task**: the BPE tokens of `../task-complexity`, every token a constant input current
-  for 5 ms (200 solver steps); the readout reads every neuron's voltage averaged over the
-  token's window (centred at -60 mV, scaled by 20 mV).
+  for 5 ms (200 solver steps), one learned value per neuron (a standard recurrent language
+  model's input); the logits are a linear readout of every neuron's voltage averaged over
+  the token's window (centred at -60 mV, scaled by 20 mV), its bias starting at the log
+  frequencies of the training tokens, without the RMSNorm the rate experiments read
+  through (their rates are unbounded; voltages and firing rates are not). At step 1,000
+  of the teacher recipe this readout beat a zero starting bias by 0.03 and 0.08
+  bits/token and RMSNorm (with the same bias) by 0.08 and 0.09 (Pospischil, HH;
+  `probes/readout_bias_3way/summary.md` in the output folder).
 * **Teachers**: everything trained (synaptic weights, single-neuron parameters, input
   and readout): 5,000 steps of 32 streams x 256 tokens (41M tokens), AdamW without weight
   decay, every tensor's gradient clipped at 1.
@@ -54,12 +59,18 @@ This experiment asks the same with biophysical neurons, on the same token task.
 * **Learning rate**: linear warmup over the first 5% of the steps, then linear decay to
   zero.
 * **Measurements**: as in `../task-complexity` (task loss, KL divergence from the teacher,
-  activity error split into the readout's directions and the rest, per-neuron
-  correlation, an error for every single-neuron parameter, each next to its
-  shuffled-neuron baseline), and every network's firing rate and the students' spike
-  counts per token against the teacher's.
+  activity error, per-neuron correlation, an error for every single-neuron parameter,
+  each next to its shuffled-neuron baseline), and every network's firing rate and the
+  students' spike counts per token against the teacher's.
 
 ## Stages
+
+Every run before 2026-11-01 (the smoke runs, the pilots and the first stage 2) read in and
+out through 75 dimensions instead of the standard input and readout above; those runs
+were removed. The choices they led to (the initial coupling, the learning rate, the
+surrogate gradient) are kept; the numbers below come from them. Stage 2 was redone with
+the standard input and readout (Results); its first redo (a zero starting readout bias) was
+cancelled after about 1,000 steps and is in `superseded/20261101/` in the output folder.
 
 0. Smoke: the 1,024-neuron configs of both models, 20 steps each (`submit_smoke.sh`).
 1. Pilot (1,024 neurons, each model, `submit_pilot.sh`, configs in `configs/pilots`): the
@@ -85,8 +96,15 @@ This experiment asks the same with biophysical neurons, on the same token task.
    simulation is unchanged). On the initial Pospischil network, this gradient keeps its
    direction (cosine above 0.95) when the parameters change by 1e-3 of their size, and an
    Adam step of 1e-3 or 3e-3 along it lowers the loss 6 to 12 times as much as one along
-   the exact gradient, on its batch and on another.
-2. Full runs: Pospischil at 1,024 and 4,096 neurons, then Hodgkin-Huxley.
+   the exact gradient, on its batch and on another. The surrogate teachers ended at 4.39
+   (Pospischil) and 4.50 (Hodgkin-Huxley) bits/token, against 5.53 and 5.82 with the exact
+   gradient, and their training now lives in the dynamics: putting the synaptic weights
+   back to their initial values costs 0.44 and 0.23 bits/token (the exact Pospischil
+   teacher: 0.002), all but the readout 4.06 and 4.98 (1.83).
+2. Full runs at 1,024 neurons, both models (`submit.sh`): the teacher with the surrogate
+   gradient (`na_activation_gradient = 0.1`) at peak learning rate 3e-3 for 5,000 steps,
+   then its ten students (shuffled start) and the control, 2,000 steps each. Then 4,096
+   neurons.
 
 ## Running
 
@@ -102,4 +120,47 @@ bash submit_pilot.sh pospischil students  # then the students and the control of
 QUEUE=gpu_rtx6000 bash submit_pilot.sh pospischil random_lr  # students from random starts, 2,000 steps
 QUEUE=gpu_rtx6000 bash submit_pilot.sh pospischil teachers_batch  # the teacher at batch 64 and 128
 QUEUE=gpu_rtx6000 bash submit_pilot.sh pospischil variant surrogate0.1  # the teacher, surrogate gradient
+bash submit.sh  # stage 2: per model, the teacher, then its ten students and the control (RTX PRO 6000s)
 ```
+
+## Results (stage 2)
+
+**The spiking students learn the task only partly, and neither their activity nor their
+single-neuron parameters come close to the teacher's.** After 2,000 steps the students'
+task loss is 11% (Pospischil) and 16% (Hodgkin-Huxley) above the teacher's, their activity
+error 16% and 29% of the shuffled-neuron baseline (the rate networks' students: 0.4%), and
+their spike counts' correlation error 0.47 and 0.44 (shuffled: 0.97). Some conductances move
+part of the way to the teacher's (Pospischil gK 0.57, gLeak 0.74; Hodgkin-Huxley gNa 0.78,
+gLeak 0.77 of the baseline's error), others do not (Hodgkin-Huxley gK 1.12, bias 1.09). The
+controls stay at the teacher's solution (activity error 0.01; their parameters drift by
+4-14% of the baseline). Figures and tables are in
+`/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/complex-neurons/figures`
+(`summarize.py`: `summary.md`, `training_curves.png`, `parameters.png`, `outcomes.png`;
+`../task-complexity/traces.py --task tokens --name <model>_n1024 --configs configs`:
+`traces_<model>_n1024.png`, the probability of the actual next token and two example
+neurons' window-mean voltages, teacher vs the best student before and after training).
+
+| model | teacher: task loss | firing rate | participation ratio | components for 90% |
+|---|---|---|---|---|
+| Pospischil | 3.695 bits/token | 23.4 Hz | 70.8 | 417 |
+| Hodgkin-Huxley | 3.994 bits/token | 20.8 Hz | 51.4 | 477 |
+
+Students (ten per model, shuffled start; median [min, max]; errors relative to the
+shuffled-neuron baseline; the readout reads every direction of the activity):
+
+| | Pospischil | Hodgkin-Huxley |
+|---|---|---|
+| task loss above the teacher's (%), start -> end | 33 -> 10.8 [8.8, 12.6] | 44 -> 16.3 [15.4, 18.9] |
+| KL from the teacher (bits/token) | 0.47 | 0.74 |
+| activity error, start -> end | 0.27 -> 0.157 [0.139, 0.175] | 0.43 -> 0.293 [0.258, 0.338] |
+| 1 - mean abs r (shuffled) | 0.107 (0.955) | 0.178 (0.95) |
+| spike counts: 1 - correlation (shuffled) | 0.47 (0.97) | 0.44 (0.97) |
+| gNa / gK / gKm / gLeak / bias error | 0.92 / 0.57 / 0.88 / 0.74 / 0.88 | 0.78 / 1.12 / - / 0.77 / 1.09 |
+| firing rate (teacher's) | 24.3 Hz (23.4) | 24.3 Hz (20.8) |
+| control: activity error | 0.010 | 0.0089 |
+
+Against the first stage 2 (75-wide input and readout; numbers from its notes, the runs were
+removed): the teachers are better (3.96 and 4.10 bits/token then) and fire about half as
+fast (40 and 39 Hz then); the Hodgkin-Huxley students end further from their teacher (task
+loss 11-13.5% above it then, activity error 0.21-0.25), with gNa and biases closer to the
+teacher's (0.88-0.94 and 1.55-1.68 then).

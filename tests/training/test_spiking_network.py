@@ -29,8 +29,8 @@ def model(name="pospischil", **kwargs):
 
 def init_io(n, rng, alpha):
     return {
-        "embed": rng.standard_normal((3, 2)),
-        "embed_proj": rng.standard_normal((n, 2)),
+        "embed": rng.standard_normal((3, n)),
+        "unembed": rng.standard_normal((3, n)),
     }
 
 
@@ -183,20 +183,95 @@ def test_spike_counts_and_features():
     )
 
 
+def test_cell_types():
+    """With cell_types = K: K / 2 excitatory and K / 2 inhibitory types in contiguous
+    groups, one value of every single-neuron parameter per type (gKm: the excitatory
+    types'), drawn around the class defaults and given to the type's neurons; the
+    settings record it, and only then; K must be even and fit both classes."""
+    net, _, m = network(neurons=20, fan_in=6, cell_types=4)
+    types = sn.cell_types(m)
+    assert types.tolist() == [0] * 8 + [1] * 8 + [2] * 2 + [3] * 2
+    assert m.settings()["cell_types"] == 4
+    assert sn.cell_types(model()) is None and "cell_types" not in model().settings()
+    own = {**net.log_g, "bias": net.bias}
+    shapes = {name: tuple(p.shape) for name, p in own.items()}
+    assert shapes == {"gNa": (4,), "gK": (4,), "gKm": (2,), "gLeak": (4,), "bias": (4,)}
+    for cond, values in sn.default_conductances(m).items():
+        log_g = net.log_g[cond].detach().numpy()
+        assert np.all(np.abs(log_g - np.log(values)) < 6 * m.spread)
+    for name, p in net.neuron_params().items():
+        assert torch.equal(p, own[name][torch.as_tensor(types[: len(p)])])
+    for bad in (3, 0, 10):  # odd, too few, more types than the 4 inhibitory neurons
+        with pytest.raises(ValueError, match="cell_types must be"):
+            model(neurons=20, fan_in=6, cell_types=bad)
+
+
+def test_cell_types_simulate_as_their_neurons():
+    """A network with cell types simulates as the network without them whose neurons
+    have their types' values, and the gradient reaches every type's values."""
+    typed, _, _ = network(neurons=20, fan_in=6, cell_types=4)
+    plain, _, _ = network(neurons=20, fan_in=6)
+    p = typed.neuron_params()
+    with torch.no_grad():
+        plain.W.copy_(typed.W)
+        for name in plain.log_g:
+            plain.log_g[name].copy_(p[name])
+        plain.bias.copy_(p["bias"])
+    current = torch.full((1, 20, 400), 5.0, dtype=torch.float64)
+    rest = typed.sim.rest_states(1)
+    typed.set_trainable(["gNa", "bias"])
+    v_typed, _ = typed.sim.segment(rest, current, typed.sim_params())
+    v_plain, _ = plain.sim.segment(rest, current, plain.sim_params())
+    assert torch.allclose(v_typed, v_plain)
+    assert typed.spike_counts(rest["v"], v_typed).sum() > 0
+    typed.features(v_typed).mean().backward()
+    for grad in (typed.log_g["gNa"].grad, typed.bias.grad):
+        assert grad.shape == (4,) and torch.all(grad != 0)
+
+
+def test_cell_type_student_starts():
+    """shuffled, with cell types: every parameter's values reassigned among the types of
+    the same class, none keeping its own; random: one draw per type; a single type per
+    class has no shuffled start."""
+    teacher, conn, _ = network(neurons=20, fan_in=6, cell_types=8)
+    with torch.no_grad():
+        teacher.bias.copy_(torch.arange(8.0))
+        for v in teacher.log_g.values():
+            v.copy_(torch.arange(float(len(v))))
+    own = {**teacher.log_g, "bias": teacher.bias}
+    for seed in range(5):
+        student = init.make_student(teacher, conn, "shuffled", seed=seed)
+        theirs = {**student.log_g, "bias": student.bias}
+        for name, t in own.items():
+            s, t = theirs[name].detach().numpy(), t.detach().numpy()
+            parts = [slice(0, 4), slice(4, 8)] if len(t) == 8 else [slice(None)]
+            for part in parts:
+                assert sorted(s[part]) == sorted(t[part]) and np.all(s[part] != t[part])
+    random = init.make_student(teacher, conn, "random", seed=1)
+    assert random.log_g["gKm"].shape == (4,) and torch.all(random.bias == 0)
+    two, conn2, _ = network(neurons=20, fan_in=6, cell_types=2)
+    with pytest.raises(ValueError, match="at least two cell types"):
+        init.make_student(two, conn2, "shuffled", seed=1)
+
+
 def test_student_starts():
     """shuffled: every single-neuron parameter permuted within the excitatory and within
-    the inhibitory neurons; teacher: the teacher's own; uniform is not available."""
+    the inhibitory neurons (the same draws as before cell types existed); teacher: the
+    teacher's own; uniform is not available."""
     teacher, conn, m = network(neurons=20, fan_in=6)
     with torch.no_grad():
         teacher.bias.copy_(torch.arange(20.0))
     student = init.make_student(teacher, conn, "shuffled", seed=1)
     n_exc = m.n_exc
+    rng = np.random.default_rng(1)
     for name, t in teacher.neuron_params().items():
         s, t = student.neuron_params()[name].detach().numpy(), t.detach().numpy()
         parts = [slice(0, n_exc), slice(n_exc, None)] if len(t) == 20 else [slice(None)]
+        expected = t.copy()
         for part in parts:
             assert sorted(s[part]) == sorted(t[part])
-        assert not np.array_equal(s, t)
+            expected[part] = rng.permutation(expected[part])
+        assert not np.array_equal(s, t) and np.array_equal(s, expected)
     assert torch.equal(student.W, teacher.W) and student.sim is teacher.sim
     same = init.make_student(teacher, conn, "teacher", seed=1)
     for name, t in teacher.neuron_params().items():

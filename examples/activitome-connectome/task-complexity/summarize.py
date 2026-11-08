@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from jaxley_pytorch.training.report import (COLORS, INK, INK2, MUTED, SURFACE, excluded, load, spread,
-                                            steps_in_thousands, style)
+                                            steps_in_thousands, style, teacher_run)
 
 TASKS = ["cycling", "chars", "tokens"]
 LOSS = {"cycling": "task loss (MSE)", "chars": "task loss (bits/token)", "tokens": "task loss (bits/token)"}
@@ -43,6 +43,12 @@ def student_row(task, start, students, n_excluded, control, base):
     first = [s["evals"][0] for s in students]
     last = [s["evals"][-1] for s in students]
     ratio = lambda evs, key: [e[key] / base[f"{key}_shuffled"] for e in evs]
+    # A readout of every direction (the token task: 4,096 tokens, 300 neurons) leaves no
+    # other directions to split the activity error into (runs from before the library
+    # record no neuron count; their readouts were narrower than the network).
+    teacher = students[0].get("teacher", {})
+    split = teacher.get("readout_rank", 0) < students[0].get("neurons", float("inf"))
+    in_split = lambda key: spread(ratio(last, key), "{:.3g}") if split else "-"
     solved = sum(e["task_loss"] <= SOLVED[task] * e["teacher_task_loss"] for e in last)
     control_ratio = f"{control['evals'][-1]['act_mse'] / base['act_mse_shuffled']:.3g}" if control else "-"
     entry = {"n": len(students), "excluded": n_excluded, "solved": solved, "initial": first, "final": last,
@@ -52,7 +58,7 @@ def student_row(task, start, students, n_excluded, control, base):
            f"{spread([e['output_vs_teacher'] for e in last])} | "
            f"{spread(ratio(first, 'act_mse'), '{:.3g}')} -> {spread(ratio(last, 'act_mse'), '{:.3g}')} | "
            f"{spread([e['act_corr_err'] for e in last], '{:.3g}')} ({base['act_corr_err_shuffled']:.3g}) | "
-           f"{spread(ratio(last, 'act_mse_readout'), '{:.3g}')} | {spread(ratio(last, 'act_mse_other'), '{:.3g}')} | "
+           f"{in_split('act_mse_readout')} | {in_split('act_mse_other')} | "
            f"{spread(ratio(last, 'gain_rmse'), '{:.3g}')} | {spread(ratio(last, 'bias_rmse'), '{:.3g}')} | "
            f"{control_ratio} |")
     return entry, row
@@ -188,7 +194,7 @@ def main():
 
     summary, teacher_rows, student_rows, curves = {}, [], [], {}
     for task in args.tasks:
-        tpath = os.path.join(args.runs, f"{task}_teacher", "seed0", "result.json")
+        tpath = os.path.join(teacher_run(args.runs, task), "result.json")
         groups = {start: load_students(args.runs, task, pattern) for start, pattern in STARTS.items()}
         cpath = os.path.join(args.runs, f"{task}_control", "seed0", "result.json")
         control = load(cpath) if os.path.exists(cpath) else None

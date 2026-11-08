@@ -31,11 +31,17 @@ The paper's Fig. 1 protocol, with the student trained on the task itself:
     by `prepare_tokens.py`; 3.98 characters per token).
 
   Every character or token is a constant input current for 10 solver steps (tau / 2).
-  Both text tasks read in and out through 75 dimensions: the input current of a token
-  is `embed_proj @ embed[token]` and the logits are `unembed @ (read_proj @ a) + bias`
-  (`a`: the rates averaged over the token's window), with 75-wide `embed` and
-  `read_proj`. For characters this is no restriction (75 symbols); it makes the two text
-  tasks differ only in their vocabulary.
+  The text tasks use a standard recurrent language model's input and readout: the input
+  current of a token is `embed[token]`, one learned value per neuron, and the logits are
+  a linear readout of every neuron, `unembed @ (a / rms(a)) + bias` (`a`: the rates
+  averaged over the token's window, `rms` their root mean square over the neurons:
+  `[task] readout_norm = "rms"`, RMSNorm without a gain); `bias` starts at the log
+  frequencies of the training tokens. Without the norm, training drives the rates up
+  until they run away (`probes/standard_readout_nan` in the output folder); with a zero
+  starting bias, the recurrent weights learn the token frequencies by building
+  self-sustained activity, which ran a teacher away (`../sparsity`; the runs with a zero
+  bias are in `superseded/20261101/`). (Until 2026-11-01 input and readout went through
+  75 dimensions instead; those runs were removed, see Results.)
 * **Teachers** (`configs/<task>_teacher.toml`): recurrent weights, gains, biases and the
   readout trained together (and, for text, the input map); the cycling task's input
   weights stay random, as in the paper. Cycling: the paper's recipe (Adam 1e-3, batches
@@ -43,7 +49,11 @@ The paper's Fig. 1 protocol, with the student trained on the task itself:
   training text, backpropagation through windows of 256 tokens (the state carries over
   from window to window), Adam 3e-3 with every tensor's gradient clipped at 1 (as in
   `examples/language_modeling`), 25,000 steps (205M tokens). An average story is 803
-  characters or 202 BPE tokens.
+  characters or 202 BPE tokens. The teachers are seed 0, except chars: with seed 0 its
+  rates ran away at step 23,390 on an ordinary passage (every rerun of that seed does the
+  same; `probes/chars_teacher_nan` in the output folder), with seed 1 the untrained
+  network already ran away under the character input, so it is seed 2, and chars and
+  tokens no longer start from the same network.
 * **Students** (`configs/<task>_students.toml`, ten per task): the teacher's weights, inputs,
   readout and initial state; gains and biases initialised as in the paper's code (the
   teacher's, permuted within the excitatory and within the inhibitory neurons, gains
@@ -66,9 +76,10 @@ The paper's Fig. 1 protocol, with the student trained on the task itself:
   segments of 256 tokens (after 32 tokens from rest); 1 - mean |Pearson r| per neuron;
   the RMS errors of gains and biases; each next to its shuffled baseline (the teacher
   against a permutation of its own neurons). The rate error is also split into the
-  readout's directions (1 for cycling, 75 for text) and the other directions, and the
-  teacher's activity dimensionality (participation ratio, components for 90% of the
-  variance) is recorded.
+  readout's directions (1 for cycling; for text as many as the vocabulary has tokens, up
+  to the number of neurons: 75 of 300 for characters, all 300 for tokens) and the other
+  directions, and the teacher's activity dimensionality (participation ratio, components
+  for 90% of the variance) is recorded.
 
 Not as in the paper: the students learn the task, not the teacher's readout (for the
 cycling task, which the teacher solves almost perfectly, this is nearly the same); the
@@ -104,22 +115,22 @@ Every arm is one config file in `configs/` with all its settings, run by
 snapshot of the repo (`probes/jaxley_pytorch/tools/snapshot.sh`) with `~/myvenv`.
 
 ```bash
-bash submit.sh         # 3 teachers; then per task 10 students and a control, and the cycling task's random-start students
-bash submit_stress.sh  # the stress test (after submit.sh)
+bash submit.sh chars tokens  # per task the teacher, then 10 students and a control (cycling: also random-start students)
+bash submit_stress.sh  # the cycling stress test (after the cycling runs)
 ```
 
 The BPE token files come from `prepare_tokens.py` (one CPU job, 2 min:
 `python prepare_tokens.py --parquet <tinystories_gpt4_clean.parquet> --vocab 4096 --out $EXP/data/bpe4096`).
 
-**The runs in `runs/` were made before `jaxley_pytorch.training` existed**, by this
-folder's `train.py`, `rate_network.py` and `tasks.py` of commit 7e3a809, and were moved
-into the configs' layout on 2026-10-25 (`runs/relayout_20261025.tsv` lists every old and
-new name). Their directories hold those scripts' `result.json` and `teacher.pt` or
+**The cycling runs in `runs/` were made before `jaxley_pytorch.training` existed**, by
+this folder's `train.py`, `rate_network.py` and `tasks.py` of commit 7e3a809, and were
+moved into the configs' layout on 2026-10-25 (`runs/relayout_20261025.tsv` lists every old
+and new name). Their directories hold those scripts' `result.json` and `teacher.pt` or
 `student.pt`, but no `config.toml`: `configs/` holds their settings. The library
-reproduces them exactly: for a few steps of the teacher and of students of every kind of
-all three tasks, in float64 on the CPU, it gives the same training losses, evaluations
-and parameters as those scripts, to the last bit (`probes/jaxley_pytorch/training_parity/`
-on /nrs). (`runs/smoke/` holds the smoke runs of those scripts.)
+reproduces them exactly: for a few steps of the teacher and of students of every kind,
+in float64 on the CPU, it gives the same training losses, evaluations and parameters as
+those scripts, to the last bit (`probes/jaxley_pytorch/training_parity/` on /nrs). The
+text runs are the library's.
 
 `summarize.py` writes `summary.md` (tables), `training_curves.png` (Fig. 1c-e for every
 task) and `outcomes.png` (every student's final task loss against its final activity
@@ -148,12 +159,15 @@ reaches 0.002). Ten students per strategy (`submit_stress.sh`; runs in
 
 ## Results
 
-**On the paper's cycling task, its result holds: students that learn the task do it with
-single-neuron activity far from the teacher's. On next-token prediction (characters or
-BPE tokens), it does not: every student that learns the task ends with essentially the
-teacher's activity (per-neuron correlation 0.993-0.999), as the hypothesis predicted.**
-Parameters are only partly recovered in either case: gains come closer to the teacher's,
-biases do not.
+**On the text tasks, students that learn the task take on the teacher's activity, but not
+its gains and biases.** Their activity error ends at 0.4-0.6% of the shuffled-neuron
+baseline (per-neuron correlation with the teacher 0.996-0.998), as small in the directions
+the chars readout does not see as in those it does; their gains end with 55-58% of the
+baseline's error, their biases with 115-166% (further from the teacher's than shuffled
+ones). **On the paper's cycling task, its result holds: students that learn the task do it
+with single-neuron activity far from the teacher's.** Their gains and biases are not
+recovered either. (The text runs before 2026-11-01 read in and out through 75 dimensions;
+they were redone with the standard input and readout above.)
 
 Figures and tables are in
 `/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/figures`:
@@ -163,60 +177,51 @@ Figures and tables are in
 | `activity_by_task.png` | every student's final activity error (relative to the shuffled-neuron baseline), per task |
 | `training_curves.png` | the paper's Fig. 1c-e per task: task loss, activity, gain and bias errors during training |
 | `outcomes.png` | final task loss against final activity error, per task |
-| `traces_cycling.png`, `traces_chars.png`, `traces_tokens.png` | the paper's Fig. 1f,g / 5c: outputs and two example neurons, teacher vs students |
+| `traces_cycling.png` | the paper's Fig. 1f,g: the readout and two example neurons, teacher vs students |
+| `traces_chars.png`, `traces_tokens.png` | 64 tokens of validation text: the probability of the actual next token and two example neurons' rates, teacher vs the best student before and after training |
 | `stress_test.png`, `stress_test.md` | the cycling stress test (below) |
 | `summary.md`, `summary.json` | all numbers |
 
-### Teachers
+### Teacher
 
 | task | validation loss | activity: participation ratio, components for 90% of variance | variance in the readout's directions |
 |---|---|---|---|
 | cycling | MSE 0.000126 | 1.9, 3 | 0.0001 (readout: 1 direction) |
-| chars | 1.560 bits/char | 21.1, 85 | 0.14 (readout: 75 directions) |
-| tokens | 3.606 bits/token = 0.907 bits/char | 25.0, 66 | 0.16 (readout: 75 directions) |
+| chars | 1.714 bits/char | 23.0, 74 | 0.21 (readout: 75 directions) |
+| tokens | 3.479 bits/token (0.875 bits/char) | 33.4, 120 | 1 (readout: every direction) |
 
 ### Students (shuffled start, as in the paper; trained on the task itself)
 
 Median [min, max]; errors are relative to the shuffled-neuron baseline (1 = no better than
 the teacher's own neurons in random order).
 
-| | cycling (10) | chars (10) | tokens (9; 1 diverged early) |
+| | cycling (10) | chars (10) | tokens (10) |
 |---|---|---|---|
-| task loss | 0.028 [0.00097, 0.051], teacher 0.000126 | 0.4-0.6% above the teacher's | 0.6-1.5% above the teacher's |
-| output vs teacher | readout MSE 0.028 | KL 0.0065 bits/token | KL 0.031 bits/token |
-| activity error, start -> end | 0.59 -> 100 [5.0, 612] | 0.30 -> 0.0015 [0.0014, 0.0019] | 0.44 -> 0.0047 [0.0042, 0.013] |
-| per-neuron correlation with the teacher | 0.32 (shuffled neurons: 0.30) | 0.9987 | 0.9973 |
-| ... in the readout's / other directions | 0.0057 / 100 | 0.0016 / 0.0015 | 0.0021 / 0.0053 |
-| gain error | 1.32 | 0.23 | 0.31 |
-| bias error | 5.8 | 0.95 | 1.27 |
-| control (teacher's own start): activity error | 0.0024 | 0.00004 | 0.0001 |
+| task loss | 0.028 [0.00097, 0.051], teacher 0.000126 | 1.73 [1.73, 1.74] bits/char, teacher 1.714 | 3.50 [3.49, 3.50] bits/token, teacher 3.479 |
+| output vs teacher | readout MSE 0.028 | KL 0.017 bits/token | KL 0.016 bits/token |
+| activity error, start -> end | 0.59 -> 100 [5.0, 612] | 0.36 -> 0.0057 [0.0050, 0.0068] | 0.51 -> 0.0038 [0.0034, 0.0039] |
+| per-neuron correlation with the teacher | 0.32 (shuffled neurons: 0.30) | 0.996 (0.13) | 0.998 (0.11) |
+| ... in the readout's / other directions | 0.0057 / 100 | 0.0065 / 0.0055 | - (the readout reads every direction) |
+| gain error | 1.32 | 0.58 | 0.55 |
+| bias error | 5.8 | 1.15 | 1.66 |
+| control (teacher's own start): activity error | 0.0024 | 4.5e-5 | 4.1e-5 |
 
+* **Text pins the activity down, not the parameters.** Every student solves the task (its
+  loss ends 0.5% (tokens) and 0.9% (chars) above the teacher's), and its activity follows the
+  teacher's token by token (`traces_chars.png`, `traces_tokens.png`); its gains and biases
+  do not follow.
 * **Cycling reproduces the paper.** Students' activity moves away from the teacher's as
   they learn (Fig. 1d of the paper); all of the mismatch lies outside the one direction
   the readout sees. Students started from random gains and biases (drawn like the
   teacher's initial ones) end much closer (activity error 1.45 [0.37, 2.33]) and with lower
   task loss, but 4 of 10 such starts run away. Even students trained to within 1.5-1.8
   times the teacher's task loss keep activity errors of 0.41-1.19 (stress test below).
-* **Text pins the activity.** Students reach the teacher's loss within 1.5% and its
-  activity to within 0.14-1.4% of the shuffled baseline: 100 to 200 times closer than
-  where they started. The pre-registered criterion (activity error <= 0.1 at the teacher's loss)
-  is met by all 10 character students and all 9 token students.
-* **Not just the readout's width.** The character teacher's activity needs 85 components
-  for 90% of its variance, more than the 75 directions its readout sees, and only 14% of
-  its variance lies in those directions; yet the students' error is as small outside them
-  as inside (0.0015 vs 0.0016). For tokens (66 components) the readout's width alone could
-  in principle account for it.
-* **Parameters stay degenerate.** Biases end as far from the teacher's as shuffled values
-  (they barely affect the activity); gains come 3 to 4 times closer. This matches the
-  paper's stiff and sloppy parameter directions.
 
 Caveats: with the paper's protocol the cycling students do not reach their teacher's task
-loss while the text students do; but in the longest stress-test run three cycling students
-come within 1.5-1.8 times the teacher's task loss and still have activity errors of
-0.41-1.19 (below), so the cycling result does not rest on students failing the task. One
-network size (300 neurons), one teacher per task. The text students' activity errors were
-still falling at 10,000 steps. The cycling control ran 7,000 steps (the other cycling
-students 15,000).
+loss; but in the longest stress-test run three of them come within 1.5-1.8 times the
+teacher's task loss and still have activity errors of 0.41-1.19 (below), so the result
+does not rest on students failing the task. One network size (300 neurons), one teacher per task (chars: seed 2, see Design).
+The cycling control ran 7,000 steps (the other cycling students 15,000).
 
 ### Stress test (cycling)
 

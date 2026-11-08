@@ -9,6 +9,7 @@ import torch
 
 from jaxley_pytorch.training import init
 from tests.training.test_rate_network import network
+from tests.training.test_spiking_network import network as spiking_network
 
 
 def test_starts():
@@ -47,3 +48,24 @@ def test_stable_student_redraws():
     )
     assert info == {"redraws": 2, "start_loss": 5.0}
     assert np.allclose(net.g.detach().numpy(), 0.9**2)
+
+
+def test_gain_scale():
+    """`gain_scale` multiplies a start's gains (the shuffled start's after their halving)
+    and leaves its biases; it carries over to the redraws; a spiking network has no
+    gains."""
+    teacher, conn = network(30)
+    random = init.make_student(teacher, conn, "random", seed=1)
+    half = init.make_student(teacher, conn, "random", seed=1, gain_scale=0.5)
+    assert torch.allclose(half.g, 0.5 * random.g) and torch.equal(half.b, random.b)
+    shuffled = init.make_student(teacher, conn, "shuffled", seed=1)
+    quarter = init.make_student(teacher, conn, "shuffled", seed=1, gain_scale=0.5)
+    assert torch.allclose(quarter.g, 0.5 * shuffled.g)
+    losses = iter([float("inf"), 5.0])
+    net, _ = init.stable_student(
+        teacher, conn, "uniform", 3, lambda _: next(losses), 1.0, gain_scale=0.5
+    )
+    assert np.allclose(net.g.detach().numpy(), 0.5 * 0.9)
+    spiking, spiking_conn, _ = spiking_network()
+    with pytest.raises(ValueError, match="gain_scale is for rate networks"):
+        init.make_student(spiking, spiking_conn, "random", seed=1, gain_scale=0.5)

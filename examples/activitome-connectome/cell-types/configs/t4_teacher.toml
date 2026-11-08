@@ -1,0 +1,40 @@
+# The teacher with 4 cell types: complex-neurons' 1,024-neuron Pospischil teacher, its neurons sharing their single-neuron parameters within 4 types (2 excitatory, 2 inhibitory).
+experiment_name = "t4_teacher"
+seeds = [0]
+
+[model]
+name = "pospischil"
+neurons = 1024
+exc_frac = 0.8
+fan_in = 150
+dt = 0.025
+input_scale = 4.0  # 23 Hz at the coupling below
+w_exc = 0.0025  # a quarter of examples/language_modeling's: the strongest tried that is stable at initialisation
+w_inh = 0.0125
+spread = 0.25
+na_activation_gradient = 0.1  # surrogate gradient (1: exact); the simulation is unchanged
+cell_types = 4  # half of them excitatory; a type shares its single-neuron parameters
+
+[task]
+name = "text"
+data = "/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/data/bpe4096"
+steps_per_token = 200
+chunk = 256
+eval_segments = 64
+eval_burn = 32
+eval_length = 256
+
+[trainer]
+trainable = ["W", "gNa", "gK", "gKm", "gLeak", "bias", "embed", "unembed", "read_bias"]
+steps = 5000
+warmup_steps = 250
+batch = 32
+lr = 3e-3  # the pilot's best of 3e-4, 1e-3 and 3e-3 (both models)
+optimizer = "adamw"
+weight_decay = 0.0
+clip = 1.0
+clip_mode = "per_tensor"
+eval_every = 250
+log_every = 10
+dtype = "float32"
+checkpoint_every = 250

@@ -380,8 +380,9 @@ def save_network(path: str, net: RateNetwork, conn: Dict, model: Dict, task: Dic
 def read_network(run_dir: str) -> Tuple[Dict, Dict, Dict]:
     """The saved network of a run directory, its connectivity and its settings: from
     `network.pt`, or from the `teacher.pt` of the scripts that ran
-    examples/activitome-connectome/task-complexity before this library (they used the
-    paper's settings; of the task, only what that file records)."""
+    examples/activitome-connectome/task-complexity's cycling task before this library
+    (they used the paper's settings). Their text teachers had a 75-wide input and
+    readout, which the text task no longer has, and are refused."""
     path = os.path.join(run_dir, "network.pt")
     old = not os.path.exists(path)
     if old:
@@ -389,13 +390,18 @@ def read_network(run_dir: str) -> Tuple[Dict, Dict, Dict]:
     ck = torch.load(path, map_location="cpu", weights_only=True)
     conn = {k: (v.item() if v.dim() == 0 else v.numpy()) for k, v in ck["conn"].items()}
     if old:
+        if ck["task"] != "cycling":
+            raise ValueError(
+                f"{run_dir}: an old text network (75-wide input and readout), which "
+                "the text task no longer has"
+            )
         model = BLKRate(int(conn["n"]), 0.7, dt=0.5, connection_prob=0.5).settings()
-        task = (
-            {"name": "cycling"}
-            if ck["task"] == "cycling"
-            else {"name": "text", "width": ck["args"]["width"], "steps_per_token": 10}
+        return ck, conn, {"model": model, "task": {"name": "cycling"}}
+    if "width" in ck["task"]:
+        raise ValueError(
+            f"{run_dir}: a text network with a {ck['task']['width']}-wide input and "
+            "readout, which the text task no longer has"
         )
-        return ck, conn, {"model": model, "task": task}
     return ck, conn, {"model": ck["model"], "task": ck["task"]}
 
 

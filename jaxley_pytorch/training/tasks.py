@@ -273,16 +273,37 @@ def eval_segments(path: str, dtype: str, n_segments: int, length: int) -> np.nda
     )
 
 
+def log_unigram(path: str, dtype: str, vocab: int) -> np.ndarray:
+    """Log frequencies of the `vocab` tokens in a token file (add-one smoothed, so every
+    token has one), centred on zero."""
+    data = np.memmap(path, dtype=dtype, mode="r")
+    counts = np.zeros(vocab)
+    for i in range(0, len(data), 1 << 24):  # bincount makes an int64 copy of its input
+        counts += np.bincount(data[i : i + (1 << 24)], minlength=vocab)
+    logp = np.log((counts + 1.0) / (counts.sum() + vocab))
+    return logp - logp.mean()
+
+
+def rms_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """`x` divided by its root mean square over the last dimension (RMSNorm, no gain)."""
+    return x / torch.sqrt((x**2).mean(-1, keepdim=True) + eps)
+
+
 class Text:
     """`[task] name = "text"`: next-token prediction on the token files in `data`
     (`train.bin`, `val.bin` and `meta.json`, as written by
     examples/language_modeling/prepare_data.py and
     examples/activitome-connectome/task-complexity/prepare_tokens.py).
 
-    Every token is a constant input current for `steps_per_token` solver steps,
-    `embed_proj @ embed[token]` with a `width`-wide embedding; the logits are `unembed @
-    (read_proj @ a) + read_bias`, with `a` the network's activity (`features`: a rate
-    network's rates) averaged over the token's window. Training: as many streams through
+    A standard recurrent language model's input and readout: every token is a constant
+    input current for `steps_per_token` solver steps, `embed[token]` (one learned value
+    per neuron); the logits are `unembed @ a + read_bias`, a linear readout of every
+    neuron, with `a` the network's activity (`features`: a rate network's rates) averaged
+    over the token's window, and `read_bias` starting at the log frequencies of the
+    training tokens (`init_io`). With `readout_norm = "rms"`, the readout reads `a` divided by
+    its root mean square over the neurons (RMSNorm without a gain, per token), so the
+    logits do not depend on the activity's overall scale; the activity the task returns
+    stays `a`. Training: as many streams through
     `train.bin` as the batch, `chunk` tokens per step (truncated backpropagation through
     time; the state carries over from step to step; with `bptt_tokens`, the gradient is
     also cut every `bptt_tokens` tokens inside a chunk, the state still carried over),
@@ -293,21 +314,25 @@ class Text:
     token are to the teacher's (next to the teacher's own against a permutation of its
     neurons, `extra_baselines`)."""
 
-    io_names = ("embed", "embed_proj", "read_proj", "unembed", "read_bias")
+    io_names = ("embed", "unembed", "read_bias")
 
     def __init__(
         self,
         data: str,
-        width: int,
         steps_per_token: int,
         chunk: int,
         eval_segments: int,
         eval_burn: int,
         eval_length: int,
         bptt_tokens: Optional[int] = None,
+        readout_norm: Optional[str] = None,
     ):
+        if readout_norm not in (None, "rms"):
+            raise ValueError(
+                f'[task] readout_norm must be "rms" (or absent), got {readout_norm!r}'
+            )
+        self.readout_norm = readout_norm
         _positive(
-            width=width,
             steps_per_token=steps_per_token,
             chunk=chunk,
             eval_segments=eval_segments,
@@ -323,7 +348,7 @@ class Text:
                 f"got {bptt_tokens!r}"
             )
         self.bptt_tokens = bptt_tokens
-        self.data, self.width, self.steps_per_token = data, width, steps_per_token
+        self.data, self.steps_per_token = data, steps_per_token
         self.chunk, self.eval_segments = chunk, eval_segments
         self.eval_burn, self.eval_length = eval_burn, eval_length
         self.meta = load_meta(data)
@@ -332,18 +357,27 @@ class Text:
         self.teacher = None
 
     def init_io(self, n: int, rng: np.random.Generator, alpha: float) -> Dict:
-        k = self.width
+        """Input currents of unit variance per neuron and token; readout weights of
+        variance 1 / n, so that the logits start at the activity's scale; the readout
+        bias at the log frequencies of the tokens in `train.bin` (`log_unigram`), so that
+        the network starts out predicting them. With a zero bias, which Adam moves by
+        about the learning rate per step, the recurrent weights learned the
+        input-independent part of the logits instead, by building self-sustained
+        activity, and ran the sparsity experiment's 900-neuron rate teacher away
+        (examples/activitome-connectome/sparsity/README.md)."""
         return {
-            "embed": rng.standard_normal((self.vocab, k)),
-            "embed_proj": rng.standard_normal((n, k)) / math.sqrt(k),
-            "read_proj": rng.standard_normal((k, n)) / math.sqrt(n),
-            "unembed": rng.standard_normal((self.vocab, k)) / math.sqrt(k),
-            "read_bias": np.zeros(self.vocab),
+            "embed": rng.standard_normal((self.vocab, n)),
+            "unembed": rng.standard_normal((self.vocab, n)) / math.sqrt(n),
+            "read_bias": log_unigram(
+                os.path.join(self.data, "train.bin"), self.meta["dtype"], self.vocab
+            ),
         }
 
     def readout_basis(self, net: RateNetwork) -> torch.Tensor:
-        """Orthonormal basis (n, width) of the activity directions the readout reads."""
-        q, _ = torch.linalg.qr(net.io["read_proj"].T.detach().double())
+        """Orthonormal basis (n, min(n, vocab)) of the activity directions the readout
+        reads (the row space of `unembed`: every direction when the vocabulary has at
+        least as many tokens as the network has neurons)."""
+        q, _ = torch.linalg.qr(net.io["unembed"].T.detach().double())
         return q
 
     def _simulate(self, net, states: Dict, current: torch.Tensor, params):
@@ -361,7 +395,7 @@ class Text:
         checkpointed; with `bptt_tokens`, the gradient through the states is cut every
         `bptt_tokens` tokens."""
         params = net.sim_params()
-        currents = net.io["embed"][tokens] @ net.io["embed_proj"].T
+        currents = net.io["embed"][tokens]
         feats, counts = [], []
         for k in range(tokens.shape[1]):
             if torch.is_grad_enabled():
@@ -384,8 +418,8 @@ class Text:
                 a, states = self._token(net, states, currents[:, k], params)
             feats.append(a)
         feats = torch.stack(feats, dim=1)
-        readout = feats @ net.io["read_proj"].T
-        logits = readout @ net.io["unembed"].T + net.io["read_bias"]
+        read = rms_norm(feats) if self.readout_norm == "rms" else feats
+        logits = read @ net.io["unembed"].T + net.io["read_bias"]
         if spikes:
             return logits, feats, states, torch.stack(counts, dim=1)
         return logits, feats, states

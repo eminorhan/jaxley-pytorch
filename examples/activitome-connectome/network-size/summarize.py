@@ -14,10 +14,12 @@ experiment's runs directory) its token runs (`tokens_teacher`, `tokens_students`
 
 Students that did not finish, or ended with a higher task loss than they started with
 (their activity ran away), are left out of the statistics and figures and counted
-(`jaxley_pytorch.training.report.excluded`).
+(`jaxley_pytorch.training.report.excluded`). With `--with-random`, also the students of
+n<N>_students_random.toml (and tokens_students_random), which start from new draws of
+the teacher's initial gains and biases: their own table rows, orange in the figures.
 
 Usage: python summarize.py --runs <runs dir> --sizes 600 1200 \
-           --task-complexity <task-complexity runs dir> --out <dir>
+           --task-complexity <task-complexity runs dir> --out <dir> [--with-random]
 """
 import argparse
 import glob
@@ -34,7 +36,9 @@ from jaxley_pytorch.training.report import (COLORS, INK, INK2, MUTED, SURFACE, e
                                             steps_in_thousands, style)
 
 SOLVED = 1.02  # a student solves the task if its task loss is at most this many times the teacher's
-LABELS = {"shuffled": "students, shuffled start", "control": "control: teacher's own start"}
+LABELS = {"shuffled": "students, shuffled start", "random": "students, random start",
+          "control": "control: teacher's own start"}
+SHOWN = ["shuffled", "control"]  # the legends' entries; main adds "random" with --with-random
 
 
 def load_run(run_dir):
@@ -42,11 +46,11 @@ def load_run(run_dir):
     return load(path) if os.path.exists(path) else None
 
 
-def load_size(runs, prefix):
+def load_size(runs, prefix, suffix=""):
     """Teacher, students that finished without running away, number left out, and control
-    of the runs `<prefix>_teacher`, `<prefix>_students` and `<prefix>_control` in `runs`
-    (None for a missing run)."""
-    dirs = sorted(glob.glob(os.path.join(runs, f"{prefix}_students", "seed*")))
+    of the runs `<prefix>_teacher`, `<prefix>_students<suffix>` and `<prefix>_control` in
+    `runs` (None for a missing run)."""
+    dirs = sorted(glob.glob(os.path.join(runs, f"{prefix}_students{suffix}", "seed*")))
     students = [s for s in map(load_run, dirs) if s is not None]
     kept = [s for s in students if not excluded(s)]
     teacher = load_run(os.path.join(runs, f"{prefix}_teacher", "seed0"))
@@ -59,20 +63,25 @@ def above_teacher(e):
     return 100 * (e["task_loss"] / e["teacher_task_loss"] - 1)
 
 
-def student_row(n, students, n_excluded, control):
+def student_row(n, students, n_excluded, control, label=None):
     base = students[0]["baselines"]
     first = [s["evals"][0] for s in students]
     last = [s["evals"][-1] for s in students]
     ratio = lambda evs, key: [e[key] / base[f"{key}_shuffled"] for e in evs]
+    # A readout of every direction (a vocabulary of at least as many tokens as neurons)
+    # leaves no other directions to split the activity error into.
+    split = students[0]["teacher"]["readout_rank"] < students[0]["neurons"]
+    in_split = lambda key: spread(ratio(last, key)) if split else "-"
     solved = sum(e["task_loss"] <= SOLVED * e["teacher_task_loss"] for e in last)
     control_ratio = f"{control['evals'][-1]['act_mse'] / base['act_mse_shuffled']:.3g}" if control else "-"
     entry = {"n": len(students), "excluded": n_excluded, "solved": solved, "initial": first, "final": last,
              "baselines": base, "act_ratio_initial": ratio(first, "act_mse"), "act_ratio_final": ratio(last, "act_mse")}
-    row = (f"| {n:,} | {len(students)} | {n_excluded} | {solved} | {spread([above_teacher(e) for e in last], '{:.2f}')} | "
+    row = (f"| {label or f'{n:,}'} | {len(students)} | {n_excluded} | {solved} | "
+           f"{spread([above_teacher(e) for e in last], '{:.2f}')} | "
            f"{spread([e['output_vs_teacher'] for e in last])} | "
            f"{spread(ratio(first, 'act_mse'))} -> {spread(ratio(last, 'act_mse'))} | "
            f"{spread([e['act_corr_err'] for e in last])} ({base['act_corr_err_shuffled']:.3g}) | "
-           f"{spread(ratio(last, 'act_mse_readout'))} | {spread(ratio(last, 'act_mse_other'))} | "
+           f"{in_split('act_mse_readout')} | {in_split('act_mse_other')} | "
            f"{spread(ratio(last, 'gain_rmse'))} | {spread(ratio(last, 'bias_rmse'))} | {control_ratio} |")
     return entry, row
 
@@ -84,14 +93,15 @@ def training_curves(sizes, path):
             ("bias_rmse", "bias_rmse_shuffled", False, "error in biases (RMS)")]
     fig, axes = plt.subplots(len(sizes), 4, figsize=(15, 3.3 * len(sizes) + 0.6), squeeze=False)
     fig.patch.set_facecolor(SURFACE)
-    for row, (n, (_, students, _, control)) in enumerate(sizes.items()):
+    for row, (n, (_, students, _, control, random)) in enumerate(sizes.items()):
         base = students[0]["baselines"]
         for col, (key, base_key, log_y, title) in enumerate(cols):
             ax = axes[row, col]
             style(ax)
-            for s in students:
-                ax.plot([e["step"] for e in s["evals"]], [e[key] for e in s["evals"]], color=COLORS["shuffled"],
-                        lw=1.0, alpha=0.75, solid_capstyle="round")
+            for start, runs in (("shuffled", students), ("random", random[0] if random else [])):
+                for s in runs:
+                    ax.plot([e["step"] for e in s["evals"]], [e[key] for e in s["evals"]], color=COLORS[start],
+                            lw=1.0, alpha=0.75, solid_capstyle="round")
             if control:
                 ax.plot([e["step"] for e in control["evals"]], [e[key] for e in control["evals"]],
                         color=COLORS["control"], lw=2.0, solid_capstyle="round")
@@ -105,29 +115,33 @@ def training_curves(sizes, path):
             steps_in_thousands(ax)
             ax.set_xlabel("training step", fontsize=8)
             ax.set_title(f"{n:,} neurons: {title}", fontsize=9, color=INK, loc="left")
-    handles = [plt.Line2D([], [], color=COLORS[k], lw=2) for k in LABELS]
-    fig.legend(handles, list(LABELS.values()), loc="upper center", ncol=2, frameon=False, fontsize=9, labelcolor=INK)
+    handles = [plt.Line2D([], [], color=COLORS[k], lw=2) for k in SHOWN]
+    fig.legend(handles, [LABELS[k] for k in SHOWN], loc="upper center", ncol=len(SHOWN), frameon=False, fontsize=9,
+               labelcolor=INK)
     fig.tight_layout(rect=(0, 0, 1, 1 - 0.5 / (3.3 * len(sizes) + 0.6)))
     fig.savefig(path, dpi=150, facecolor=SURFACE)
 
 
 def marker_legend(fig, fontsize):
-    handles = [plt.Line2D([], [], ls="", marker=m, ms=7, color=COLORS[k], markeredgecolor=SURFACE)
-               for k, m in [("shuffled", "o"), ("control", "D")]]
-    fig.legend(handles, list(LABELS.values()), loc="upper center", ncol=2, frameon=False, fontsize=fontsize,
-               labelcolor=INK)
+    markers = {"shuffled": "o", "random": "o", "control": "D"}
+    handles = [plt.Line2D([], [], ls="", marker=markers[k], ms=7, color=COLORS[k], markeredgecolor=SURFACE)
+               for k in SHOWN]
+    fig.legend(handles, [LABELS[k] for k in SHOWN], loc="upper center", ncol=len(SHOWN), frameon=False,
+               fontsize=fontsize, labelcolor=INK)
 
 
 def outcomes(sizes, path):
     fig, axes = plt.subplots(1, len(sizes), figsize=(max(5.2 * len(sizes), 9.0), 5.0), squeeze=False)
     fig.patch.set_facecolor(SURFACE)
-    for col, (n, (_, students, n_excluded, control)) in enumerate(sizes.items()):
+    for col, (n, (_, students, n_excluded, control, random)) in enumerate(sizes.items()):
         ax = axes[0, col]
         style(ax)
         base = students[0]["baselines"]
-        last = [s["evals"][-1] for s in students]
-        ax.scatter([above_teacher(e) for e in last], [e["act_mse"] / base["act_mse_shuffled"] for e in last], s=42,
-                   color=COLORS["shuffled"], edgecolor=SURFACE, linewidth=1.5, zorder=3)
+        for start, runs in (("shuffled", students), ("random", random[0] if random else [])):
+            last = [s["evals"][-1] for s in runs]
+            ax.scatter([above_teacher(e) for e in last], [e["act_mse"] / base["act_mse_shuffled"] for e in last],
+                       s=42, color=COLORS[start], edgecolor=SURFACE, linewidth=1.5, zorder=3)
+        n_excluded += random[1] if random else 0
         if control:
             e = control["evals"][-1]
             ax.scatter([above_teacher(e)], [e["act_mse"] / base["act_mse_shuffled"]], s=60, marker="D",
@@ -157,11 +171,12 @@ def activity_by_size(sizes, path):
     fig.patch.set_facecolor(SURFACE)
     style(ax)
     rng = np.random.default_rng(0)
-    for n, (_, students, _, control) in sizes.items():
+    for n, (_, students, _, control, random) in sizes.items():
         base = students[0]["baselines"]
-        r = [s["evals"][-1]["act_mse"] / base["act_mse_shuffled"] for s in students]
-        ax.scatter(n * 2.0 ** rng.uniform(-0.025, 0.025, len(r)), r, s=36, color=COLORS["shuffled"],
-                   edgecolor=SURFACE, linewidth=1.2, zorder=3)
+        for start, runs in (("shuffled", students), ("random", random[0] if random else [])):
+            r = [s["evals"][-1]["act_mse"] / base["act_mse_shuffled"] for s in runs]
+            ax.scatter(n * 2.0 ** rng.uniform(-0.025, 0.025, len(r)), r, s=36, color=COLORS[start],
+                       edgecolor=SURFACE, linewidth=1.2, zorder=3)
         if control:
             ax.scatter([n], [control["evals"][-1]["act_mse"] / base["act_mse_shuffled"]], s=50, marker="D",
                        color=COLORS["control"], edgecolor=SURFACE, linewidth=1.2, zorder=3)
@@ -188,8 +203,12 @@ def main():
     parser.add_argument("--sizes", nargs="+", type=int, required=True)
     parser.add_argument("--task-complexity", help="task-complexity's runs directory (its token runs: 300 neurons)")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--with-random", action="store_true",
+                        help="also the random-start students (<prefix>_students_random)")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
+    if args.with_random:
+        SHOWN.insert(1, "random")
 
     arms = [(args.runs, f"n{n}") for n in args.sizes]
     if args.task_complexity:
@@ -200,11 +219,12 @@ def main():
         if teacher is None:
             print(f"{os.path.join(runs, prefix)}: no teacher result, left out", flush=True)
             continue
-        sizes[neurons(teacher)] = (teacher, kept, n_excluded, control)
+        random = load_size(runs, prefix, "_random")[1:3] if args.with_random else None
+        sizes[neurons(teacher)] = (teacher, kept, n_excluded, control, random)
     sizes = dict(sorted(sizes.items()))
 
     summary, teacher_rows, student_rows = {}, [], []
-    for n, (teacher, kept, n_excluded, control) in sizes.items():
+    for n, (teacher, kept, n_excluded, control, random) in sizes.items():
         t = teacher["evals"][-1]
         teacher_rows.append(f"| {n:,} | {teacher['synapses']:,} | {t['task_loss']:.3f} bits/token, "
                             f"{t['val_bits_per_char']:.3f} bits/char | {t['participation_ratio']:.1f} | "
@@ -212,6 +232,9 @@ def main():
         entry = {"synapses": teacher["synapses"], "teacher": t, "control_final": control["evals"][-1] if control else None}
         if kept:
             entry["students"], row = student_row(n, kept, n_excluded, control)
+            student_rows.append(row)
+        if random and random[0]:
+            entry["students_random"], row = student_row(n, *random, control, label=f"{n:,}, random start")
             student_rows.append(row)
         summary[n] = entry
 
@@ -223,7 +246,9 @@ def main():
              "Median [min, max] over the students of a size, all started from the teacher's gains and biases permuted "
              "(gains halved). Left out: did not finish, or ended with a higher task loss than at the start. Errors are "
              "relative to the shuffled baseline unless noted. Solved: task loss within 2% of the teacher's. Control: the "
-             "student started from the teacher's own gains and biases.", "",
+             "student started from the teacher's own gains and biases."
+             + (" Rows marked random start: the students started from new draws of the teacher's initial gains and "
+                "biases instead; their errors are relative to the same baselines." if args.with_random else ""), "",
              "| neurons | students | left out | solved | task loss above the teacher's (%) | KL from the teacher "
              "(bits/token) | activity error, before -> after | 1 - mean abs r (shuffled) | activity error in the "
              "readout's directions | ... in the other directions | gain error | bias error | control: activity error "

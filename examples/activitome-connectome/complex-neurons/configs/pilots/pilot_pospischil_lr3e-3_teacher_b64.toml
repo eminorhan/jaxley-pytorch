@@ -16,7 +16,6 @@ spread = 0.25
 [task]
 name = "text"
 data = "/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/data/bpe4096"
-width = 75
 steps_per_token = 200
 chunk = 256
 eval_segments = 64
@@ -24,7 +23,7 @@ eval_burn = 32
 eval_length = 256
 
 [trainer]
-trainable = ["W", "gNa", "gK", "gKm", "gLeak", "bias", "embed", "embed_proj", "read_proj", "unembed", "read_bias"]
+trainable = ["W", "gNa", "gK", "gKm", "gLeak", "bias", "embed", "unembed", "read_bias"]
 steps = 2000
 warmup_steps = 100
 batch = 64

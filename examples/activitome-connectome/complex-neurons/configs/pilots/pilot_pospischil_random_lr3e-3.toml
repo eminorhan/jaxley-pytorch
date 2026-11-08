@@ -9,7 +9,6 @@ start = "random"
 [task]
 name = "text"
 data = "/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/data/bpe4096"
-width = 75
 steps_per_token = 200
 chunk = 256
 eval_segments = 64
