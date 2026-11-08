@@ -5,8 +5,8 @@ Reads, for every model in `--models`, the runs of configs/<model>_n1024_teacher.
 <model>_n1024_students.toml and <model>_n1024_control.toml in `--runs`
 (`<model>_n1024_teacher/seed0`, `<model>_n1024_students/seed<k>`,
 `<model>_n1024_control/seed0`), or with `--group LABEL RUNS PREFIX` (repeated) the runs
-<PREFIX>_teacher, <PREFIX>_students and <PREFIX>_control in RUNS of every group, in
-that order; writes to `--out`:
+<PREFIX>_teacher, <PREFIX>_students<SUFFIX> and <PREFIX>_control<SUFFIX> in RUNS of every
+group, in that order (`--suffix`, empty by default); writes to `--out`:
 
   summary.md, summary.json  the tables;
   training_curves.png       task loss, activity error and spike-count correlation during
@@ -45,12 +45,13 @@ PARAMS = ["gNa", "gK", "gKm", "gLeak", "bias"]  # the single-neuron parameters (
 LABELS = {"shuffled": "students, shuffled start", "control": "control: teacher's own start"}
 
 
-def load_group(runs, prefix):
+def load_group(runs, prefix, suffix=""):
     """Teacher, students that finished without running away, number left out, control."""
     teacher = load(os.path.join(teacher_run(runs, prefix), "result.json"))
-    students = [load(p) for p in sorted(glob.glob(os.path.join(runs, f"{prefix}_students", "seed*", "result.json")))]
+    students = [load(p) for p in sorted(glob.glob(os.path.join(runs, f"{prefix}_students{suffix}", "seed*",
+                                                                "result.json")))]
     kept = [s for s in students if not excluded(s)]
-    path = os.path.join(runs, f"{prefix}_control", "seed0", "result.json")
+    path = os.path.join(runs, f"{prefix}_control{suffix}", "seed0", "result.json")
     control = load(path) if os.path.exists(path) else None
     return teacher, kept, len(students) - len(kept), control
 
@@ -247,6 +248,7 @@ def main():
     parser.add_argument("--models", nargs="+", choices=list(NAMES), default=list(NAMES))
     parser.add_argument("--group", nargs=3, action="append", metavar=("LABEL", "RUNS", "PREFIX"),
                         help="instead of --models: a group of runs (repeat for more)")
+    parser.add_argument("--suffix", default="", help="of the students' and controls' run names (e.g. _lr5e-3)")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
     if args.group:
@@ -255,7 +257,7 @@ def main():
         groups = [(NAMES[m], args.runs, f"{m}_n1024") for m in args.models]
     else:
         parser.error("give --runs (with --models) or --group")
-    models = {label: load_group(runs, prefix) for label, runs, prefix in groups}
+    models = {label: load_group(runs, prefix, args.suffix) for label, runs, prefix in groups}
     text, out = tables(models)
     with open(os.path.join(args.out, "summary.md"), "w") as f:
         f.write(text + "\n")

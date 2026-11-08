@@ -1,0 +1,31 @@
+# t8_students.toml at a peak learning rate of 5e-3 instead of 1e-3 (the same starts and seeds).
+experiment_name = "t8_students_lr5e-3"
+seeds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+[init]
+teacher = "t8_teacher/seed0"
+start = "shuffled"
+
+[task]
+name = "text"
+data = "/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/data/bpe4096"
+steps_per_token = 200
+chunk = 256
+eval_segments = 64
+eval_burn = 32
+eval_length = 256
+
+[trainer]
+trainable = ["gNa", "gK", "gKm", "gLeak", "bias"]
+steps = 2000
+warmup_steps = 100
+batch = 32
+lr = 5e-3  # room to move each value about 5 units (1e-3: about 1)
+optimizer = "adamw"
+weight_decay = 0.0
+clip = 2.0
+clip_mode = "global"
+eval_every = 100
+log_every = 10
+dtype = "float32"
+checkpoint_every = 500
