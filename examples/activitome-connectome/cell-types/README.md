@@ -13,7 +13,8 @@ degeneracy make the parameters identifiable, and the activity recoverable?
 Everything as `../complex-neurons`' Pospischil stage 2: 1,024 neurons with 150 inputs each,
 the BPE token task, the surrogate gradient (`na_activation_gradient = 0.1`), the teacher
 trained for 5,000 steps at a peak learning rate of 3e-3, ten students and a control per
-teacher trained for 2,000 steps at 1e-3, and the same measurements. The differences:
+teacher trained with the teacher's schedule (until 2026-11-08: 2,000 steps at 1e-3, see
+Results), and the same measurements. The differences:
 
 * **Cell types** (`[model] cell_types = K`, K = 4, 8, 16): the 819 excitatory neurons in
   K / 2 contiguous groups of (nearly) equal size, the 205 inhibitory ones likewise (a
@@ -65,3 +66,73 @@ The summary is `../complex-neurons/summarize.py` with one `--group` per number o
 `../complex-neurons`' Pospischil runs as the per-neuron reference: `summary.md` (tables),
 `training_curves.png`, `parameters.png`, `outcomes.png` and `by_group.png` (every student's
 final error in the activity and in every single-neuron parameter, per number of types).
+
+`submit_lr5e-3.sh` and `configs/*_lr5e-3.toml` are the pilot at a peak learning rate of 5e-3
+(Results); `../rerun_students.sh` reran every experiment's students and controls with the
+teachers' schedules on 2026-11-08.
+
+## Results
+
+**Sharing the single-neuron parameters within cell types lets the students recover them:
+all of them but gKm with 4 types, most with 16, part with 8. Without types
+(`../complex-neurons`) the students reach the teacher's task loss and activity with other
+parameters.** Tables and figures are in
+`/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/cell-types/figures`.
+
+| types | teacher: task loss | firing rate | participation ratio | components for 90% |
+|---|---|---|---|---|
+| 4 | 3.649 bits/token | 5.6 Hz | 75.5 | 396 |
+| 8 | 3.615 bits/token | 14.2 Hz | 72.3 | 365 |
+| 16 | 3.616 bits/token | 10.3 Hz | 71.4 | 363 |
+| 1,024 (`../complex-neurons`) | 3.695 bits/token | 23.4 Hz | 70.8 | 417 |
+
+Students (ten per teacher; median [min, max], without a range where the ten agree to the
+digits shown; errors relative to the shuffled-neuron baseline):
+
+| | 4 types | 8 types | 16 types | 1,024 types |
+|---|---|---|---|---|
+| task loss above the teacher's (%), start -> end | 36 -> -0.01 | 66 -> 1.41 [0.36, 2.66] | 38 -> 0.19 [0.01, 1.02] | 33 -> 0.48 [0.27, 0.63] |
+| activity error, start -> end | 0.32 -> 0.0003 | 0.45 -> 0.011 [0.005, 0.019] | 0.36 -> 0.003 [0.001, 0.010] | 0.27 -> 0.030 [0.029, 0.033] |
+| spike counts: 1 - correlation | 0.03 | 0.29 [0.15, 0.38] | 0.17 [0.07, 0.32] | 0.32 |
+| firing rate (teacher's) | 5.7 Hz (5.6) | 11.9 Hz [8.9, 15.1] (14.2) | 9.4 Hz [7.8, 10.6] (10.3) | 18.6 Hz (23.4) |
+| gNa error | 0.03 | 0.46 [0.18, 0.95] | 0.20 [0.08, 0.63] | 0.52 |
+| gK error | 0.06 | 0.46 [0.22, 0.90] | 0.23 [0.10, 0.63] | 0.51 |
+| gLeak error | 0.01 | 0.05 [0.02, 0.15] | 0.05 [0.02, 0.07] | 0.17 |
+| bias error | 0.05 | 0.24 [0.09, 0.44] | 0.08 [0.04, 0.12] | 0.60 |
+| gKm error | 0.57 | 0.71 [0.40, 1.03] | 1.01 [0.65, 1.43] | 0.78 |
+| control: activity error | 0.0006 | 0.002 | 0.0015 | 0.019 |
+| control: gNa / gK / gLeak / bias / gKm error | 0.01 / 0.11 / 0.02 / 0.05 / 1.72 | 0.10 / 0.10 / 0.04 / 0.15 / 0.78 | 0.03 / 0.08 / 0.05 / 0.06 / 1.35 | 0.26 / 0.19 / 0.14 / 0.36 / 0.64 |
+
+* **4 types**: every student ends at the teacher's task loss, activity and spikes, with
+  gNa, gK, gLeak and the biases back at the teacher's values (errors 0.01-0.06, the
+  control's level). The ten students share one start (with two types per class, the swap
+  is the only reassignment in which no type keeps its own values), so they differ only in
+  the order of the training text.
+* **16 types**: the students come most of the way. The three that end at the teacher's
+  task loss (within 0.02%) have gNa errors of 0.08-0.13 and gK errors of 0.10-0.20; the
+  three furthest from it (0.6-1.0% above) have 0.35-0.63 and 0.21-0.63.
+* **8 types**: the students end at different values (gNa error 0.18-0.95), 0.4-2.7% above
+  the teacher's task loss, and half of them fire at 9-10.5 Hz against the teacher's 14.2.
+  Why 8 types do worse than 16 was not measured (their starts are worse: 5.3-6.9
+  bits/token, against 4.9-5.3 with 16 types).
+* In 8 and 16 types the students with the larger parameter errors also end with the
+  higher task loss, and the errors were still falling when the learning rate reached zero
+  (gNa and gK by 20-32% over the second half of training). This points to unfinished
+  learning, not to other solutions at the teacher's task loss.
+* **gKm is not pinned by the task**: the controls' gKm moves away from the teacher's (to
+  0.78-1.72 of the baseline's error) while their task loss and activity stay; the
+  students' ends at 0.57-1.01.
+* **Without types**, the students reach the teacher's task loss within 0.5% and its
+  activity within 3% of the baseline, with parameters 0.17-0.78 away from the teacher's,
+  and the control's parameters leave the teacher's too (0.14-0.64).
+
+Earlier rounds: until 2026-11-08 students and controls trained for 2,000 steps at a peak
+learning rate of 1e-3, a third of the teacher's; near their end (step 1,900, before they
+were cancelled) the students were 13-36% above the teacher's task loss, with activity
+errors of 0.16-0.34. Adam moves a value by about the learning rate per step, about 1 unit
+over that schedule, and the starts are 0.8-3.5 units from the teacher's values. A pilot at
+5e-3 (one student per group, cancelled after step 1,300) followed the 1e-3 students' path
+at the same summed learning rate, only faster, and the task loss falls all the way along
+the straight line from a student's start to the teacher for 11 of 12 starts
+(`probes/student_progress`, `probes/line_scan` and `probes/student_budget` in the output
+folder; the 1e-3 runs are in `superseded/20261108/`, the pilot's in `runs/*_lr5e-3`).

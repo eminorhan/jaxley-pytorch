@@ -57,10 +57,14 @@ The paper's Fig. 1 protocol, with the student trained on the task itself:
 * **Students** (`configs/<task>_students.toml`, ten per task): the teacher's weights, inputs,
   readout and initial state; gains and biases initialised as in the paper's code (the
   teacher's, permuted within the excitatory and within the inhibitory neurons, gains
-  halved), and only these trained (Adam 1e-3, gradient norm clipped at 2) on the task
-  itself: the cycling task's target (mean squared error, 15,000 steps: after the paper's
-  7,000 they were still learning the task) or the next token of the text (cross-entropy,
-  10,000 steps of 32 x 256 tokens). The teacher's outputs are not used. One **control
+  halved), and only these trained (gradient norm clipped at 2) on the task itself: the
+  cycling task's target (mean squared error; Adam 1e-3, the teacher's rate, for 15,000
+  steps: after the paper's 7,000 they were still learning the task) or the next token of
+  the text (cross-entropy; the teacher's schedule, Adam 3e-3 for 25,000 steps of 32 x 256
+  tokens). Until 2026-11-08 the text students trained at 1e-3 for 10,000 steps; their
+  errors were still falling when the learning rate reached zero, so they and the controls
+  were rerun (`../rerun_students.sh`; the earlier runs are in `superseded/20261108/` in
+  the output folder). The teacher's outputs are not used. One **control
   student** per task (`configs/<task>_control.toml`) starts from the teacher's own gains
   and biases: how far training alone moves a student away from the teacher sets the floor
   of the activity error. For the cycling task, ten more students start from new random
@@ -138,7 +142,8 @@ error); `traces.py` writes `traces_cycling.png` (Fig. 1f,g: the readout and two 
 the teacher and in the best student of each start). Figures: `$EXP/figures`.
 Measured on an H100 (smoke test): a training step takes 0.085 s (cycling, 32 trials) or
 0.55 s (text, 32 x 256 tokens, 14,800 tokens/s); a text student's evaluation takes about
-22 s; at most 1.4 GB of GPU memory. Estimated: text teachers 4 h, text students 1.8 h.
+22 s; at most 1.4 GB of GPU memory. The text runs (compiled, on RTX PRO 6000s) take about
+36 minutes per teacher and 30 per student (25,000 steps each).
 
 ## Stress test (cycling)
 
@@ -159,15 +164,19 @@ reaches 0.002). Ten students per strategy (`submit_stress.sh`; runs in
 
 ## Results
 
-**On the text tasks, students that learn the task take on the teacher's activity, but not
-its gains and biases.** Their activity error ends at 0.4-0.6% of the shuffled-neuron
-baseline (per-neuron correlation with the teacher 0.996-0.998), as small in the directions
-the chars readout does not see as in those it does; their gains end with 55-58% of the
-baseline's error, their biases with 115-166% (further from the teacher's than shuffled
-ones). **On the paper's cycling task, its result holds: students that learn the task do it
-with single-neuron activity far from the teacher's.** Their gains and biases are not
-recovered either. (The text runs before 2026-11-01 read in and out through 75 dimensions;
-they were redone with the standard input and readout above.)
+**On the text tasks, students that learn the task take on the teacher's activity; their
+gains come most of the way to the teacher's, their biases part of the way (chars) or not
+at all (tokens).** Their activity error ends at 0.02-0.05% of the shuffled-neuron baseline
+(per-neuron correlation with the teacher 0.9997-0.9999), as small in the directions the
+chars readout does not see as in those it does; their gains end with 14% (chars) and 23%
+(tokens) of the baseline's error, their biases with 42% and 102%. **On the paper's cycling
+task, its result holds: students that learn the task do it with single-neuron activity far
+from the teacher's.** Their gains and biases are not recovered either. (The text runs
+before 2026-11-01 read in and out through 75 dimensions; they were redone with the
+standard input and readout above. The text students before 2026-11-08 trained at a third
+of their teacher's learning rate for 10,000 steps and ended with activity errors of
+0.4-0.6%, gain errors of 55-58% and bias errors of 115-166%; they were redone with the
+teacher's schedule, see Design.)
 
 Figures and tables are in
 `/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity/figures`:
@@ -197,19 +206,26 @@ the teacher's own neurons in random order).
 
 | | cycling (10) | chars (10) | tokens (10) |
 |---|---|---|---|
-| task loss | 0.028 [0.00097, 0.051], teacher 0.000126 | 1.73 [1.73, 1.74] bits/char, teacher 1.714 | 3.50 [3.49, 3.50] bits/token, teacher 3.479 |
-| output vs teacher | readout MSE 0.028 | KL 0.017 bits/token | KL 0.016 bits/token |
-| activity error, start -> end | 0.59 -> 100 [5.0, 612] | 0.36 -> 0.0057 [0.0050, 0.0068] | 0.51 -> 0.0038 [0.0034, 0.0039] |
-| per-neuron correlation with the teacher | 0.32 (shuffled neurons: 0.30) | 0.996 (0.13) | 0.998 (0.11) |
-| ... in the readout's / other directions | 0.0057 / 100 | 0.0065 / 0.0055 | - (the readout reads every direction) |
-| gain error | 1.32 | 0.58 | 0.55 |
-| bias error | 5.8 | 1.15 | 1.66 |
-| control (teacher's own start): activity error | 0.0024 | 4.5e-5 | 4.1e-5 |
+| task loss | 0.028 [0.00097, 0.051], teacher 0.000126 | 1.7144 [1.7140, 1.7146] bits/char, teacher 1.7142 | 3.4782 [3.4778, 3.4786] bits/token, teacher 3.4787 |
+| output vs teacher | readout MSE 0.028 | KL 0.0006 bits/token | KL 0.0017 bits/token |
+| activity error, start -> end | 0.59 -> 100 [5.0, 612] | 0.36 -> 0.00021 [0.00017, 0.00026] | 0.51 -> 0.00048 [0.00045, 0.00053] |
+| per-neuron correlation with the teacher | 0.32 (shuffled neurons: 0.30) | 0.9999 (0.13) | 0.9997 (0.11) |
+| ... in the readout's / other directions | 0.0057 / 100 | 0.00016 / 0.00022 | - (the readout reads every direction) |
+| gain error | 1.32 | 0.14 | 0.23 |
+| bias error | 5.8 | 0.42 | 1.02 |
+| control (teacher's own start): activity error | 0.0024 | 0.00014 | 0.00016 |
+| control: gain / bias error | 0.13 / 0.82 | 0.15 / 0.31 | 0.15 / 0.43 |
 
-* **Text pins the activity down, not the parameters.** Every student solves the task (its
-  loss ends 0.5% (tokens) and 0.9% (chars) above the teacher's), and its activity follows the
-  teacher's token by token (`traces_chars.png`, `traces_tokens.png`); its gains and biases
-  do not follow.
+* **Text pins the activity down, and most of the gains.** Every student ends at the
+  teacher's loss (within 0.03% of it), and its activity follows the teacher's token by
+  token (`traces_chars.png`, `traces_tokens.png`). The controls show how far training alone
+  moves the parameters away from the teacher's: gains 0.15, biases 0.31 (chars) and 0.43
+  (tokens) of the baseline's error. The chars students' gains end at that level (0.14) and
+  their biases near it (0.42); the tokens students' gains end at 0.23, and their biases no
+  closer to the teacher's than shuffled ones (1.02). Gains and biases were still moving
+  towards the teacher's when the learning rate reached zero: over the second half of
+  training the gain error fell by 19-24% and the bias error by 10-25%, so these errors are
+  upper bounds.
 * **Cycling reproduces the paper.** Students' activity moves away from the teacher's as
   they learn (Fig. 1d of the paper); all of the mismatch lies outside the one direction
   the readout sees. Students started from random gains and biases (drawn like the
@@ -221,7 +237,9 @@ Caveats: with the paper's protocol the cycling students do not reach their teach
 loss; but in the longest stress-test run three of them come within 1.5-1.8 times the
 teacher's task loss and still have activity errors of 0.41-1.19 (below), so the result
 does not rest on students failing the task. One network size (300 neurons), one teacher per task (chars: seed 2, see Design).
-The cycling control ran 7,000 steps (the other cycling students 15,000).
+The cycling control ran 7,000 steps (the other cycling students 15,000). The cycling
+students were not rerun with their teacher's schedule on 2026-11-08: the teacher trained
+at their learning rate (1e-3), for fewer steps (3,000).
 
 ### Stress test (cycling)
 

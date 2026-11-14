@@ -11,7 +11,7 @@ set -euo pipefail
 set -x
 ALL="600 900"
 SIZES="${*:-$ALL}"
-declare -A TEACHER_W=([600]=2:00 [900]=3:00) STUDENT_W=([600]=1:00 [900]=1:00)
+declare -A TEACHER_W=([600]=2:00 [900]=3:00) STUDENT_W=([600]=2:00 [900]=3:00)
 EXP=/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/network-size
 TC=/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/task-complexity
 S=$(/nrs/scicompsoft/orhane/probes/jaxley_pytorch/tools/snapshot.sh)

@@ -19,10 +19,10 @@ readout_norm = "rms"  # RMSNorm on the activity before the readout (keeps the ra
 
 [trainer]
 trainable = ["g", "b"]
-steps = 10000
-warmup_steps = 500
+steps = 25000
+warmup_steps = 1250
 batch = 32
-lr = 1e-3
+lr = 5e-3  # the teacher's schedule
 optimizer = "adamw"
 weight_decay = 0.0
 clip = 2.0

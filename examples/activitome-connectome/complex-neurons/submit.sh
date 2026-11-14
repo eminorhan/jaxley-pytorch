@@ -1,11 +1,11 @@
 #!/bin/bash
 # Stage 2 at 1,024 neurons, per model (pospischil, hh; default both): the teacher (configs/<model>_n1024_teacher.toml,
-# 5,000 steps, surrogate gradient na_activation_gradient = 0.1, lr 3e-3), then, when it is done, its ten students
-# (seeds 1-10, a job array, shuffled start) and the control (the teacher's own start), 2,000 steps each. One GPU each:
-# an RTX PRO 6000 (QUEUE=gpu_h100 for an H100). From a snapshot of the repo; the runs go to
-# runs/<experiment_name>/seed<k>; a run that stopped early continues with the same command plus --resume.
-# Time limits: about 1.4x the pilots' step times on an RTX PRO 6000 (Pospischil 14.2 s, Hodgkin-Huxley 12.3 s per
-# step, plus about 3 minutes per evaluation): teacher about 21 h, students and control about 9 h.
+# 5,000 steps, surrogate gradient na_activation_gradient = 0.1, lr 5e-3), then, when it is done, its ten students
+# (seeds 1-10, a job array, shuffled start) and the control (the teacher's own start), with the teacher's schedule
+# (5,000 steps, lr 5e-3). One GPU each: an RTX PRO 6000 (QUEUE=gpu_h100 for an H100). From a snapshot of the repo;
+# the runs go to runs/<experiment_name>/seed<k>; a run that stopped early continues with the same command plus
+# --resume. Time limits: 30 h per run, about 1.4x the measured run times on an RTX PRO 6000 (students: 17 h
+# Hodgkin-Huxley, 20 h Pospischil; 12.3 and 14.2 s per step, plus about 3 minutes per evaluation).
 # With HOLD_TEACHERS=1 the teachers are submitted held (bsub -H; they keep their place in the queue): release them with
 # bresume once their run directories are free.
 # Usage: [QUEUE=gpu_h100] [HOLD_TEACHERS=1] bash submit.sh [pospischil] [hh]
@@ -29,8 +29,8 @@ for M in $MODELS; do
   case "$M" in pospischil|hh) ;; *) echo "unknown model $M" >&2; exit 2 ;; esac
   T=$(bsub -P miaai -q $QUEUE -gpu "num=1" -n $SLOTS -W 30:00 "${HOLD[@]}" -J cn_${M}_n1024_teacher \
     -o $EXP/jobs/${M}_n1024_teacher_%J.log "$ENV $RUN $C/${M}_n1024_teacher.toml" | sed -n 's/.*<\([0-9]*\)>.*/\1/p')
-  bsub -P miaai -q $QUEUE -gpu "num=1" -n $SLOTS -W 14:00 -w "done($T)" -J "cn_${M}_n1024_students[1-10]" \
+  bsub -P miaai -q $QUEUE -gpu "num=1" -n $SLOTS -W 30:00 -w "done($T)" -J "cn_${M}_n1024_students[1-10]" \
     -o $EXP/jobs/${M}_n1024_students_%J_%I.log "$ENV $RUN $C/${M}_n1024_students.toml --seed \$LSB_JOBINDEX"
-  bsub -P miaai -q $QUEUE -gpu "num=1" -n $SLOTS -W 14:00 -w "done($T)" -J cn_${M}_n1024_control \
+  bsub -P miaai -q $QUEUE -gpu "num=1" -n $SLOTS -W 30:00 -w "done($T)" -J cn_${M}_n1024_control \
     -o $EXP/jobs/${M}_n1024_control_%J.log "$ENV $RUN $C/${M}_n1024_control.toml"
 done

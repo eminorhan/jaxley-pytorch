@@ -24,7 +24,7 @@ loss than they started with, are left out of the statistics and figures and coun
 (`jaxley_pytorch.training.report.excluded`).
 
 Usage: python summarize.py --runs <runs dir> --out <dir> [--models pospischil hh]
-       python summarize.py --group LABEL RUNS PREFIX [--group ...] --out <dir>
+       python summarize.py --group LABEL RUNS PREFIX [--group ...] --out <dir> [--title <heading>]
 """
 import argparse
 import glob
@@ -61,7 +61,7 @@ def above_teacher(e):
     return 100 * (e["task_loss"] / e["teacher_task_loss"] - 1)
 
 
-def tables(models):
+def tables(models, title):
     rows_t = ["| model | task loss (validation) | firing rate | participation ratio | components for 90% |",
               "|---|---|---|---|---|"]
     head = ("| model | students | left out | task loss above the teacher's (%) | KL from the teacher (bits/token) | "
@@ -89,7 +89,7 @@ def tables(models):
         out[label] = {"teacher": t, "students": len(students), "excluded": n_excluded, "baselines": base,
                       "initial": first, "final": last, "control_final": control["evals"][-1] if control else None}
     text = "\n".join(
-        ["# complex-neurons, stage 2 (1,024 neurons)", "", "## Teachers", ""] + rows_t
+        [f"# {title}", "", "## Teachers", ""] + rows_t
         + ["", "## Students", "",
            "Median [min, max] over the students of a model, all started from the teacher's single-neuron parameters "
            "permuted within the excitatory and within the inhibitory neurons. Left out: did not finish, or ended with "
@@ -249,6 +249,7 @@ def main():
     parser.add_argument("--group", nargs=3, action="append", metavar=("LABEL", "RUNS", "PREFIX"),
                         help="instead of --models: a group of runs (repeat for more)")
     parser.add_argument("--suffix", default="", help="of the students' and controls' run names (e.g. _lr5e-3)")
+    parser.add_argument("--title", default="complex-neurons, stage 2 (1,024 neurons)", help="summary.md's heading")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
     if args.group:
@@ -258,7 +259,7 @@ def main():
     else:
         parser.error("give --runs (with --models) or --group")
     models = {label: load_group(runs, prefix, args.suffix) for label, runs, prefix in groups}
-    text, out = tables(models)
+    text, out = tables(models, args.title)
     with open(os.path.join(args.out, "summary.md"), "w") as f:
         f.write(text + "\n")
     with open(os.path.join(args.out, "summary.json"), "w") as f:

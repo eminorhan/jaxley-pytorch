@@ -36,11 +36,15 @@ AdamW without weight decay, which is Adam's update.)
   of 3e-3, every tensor's gradient clipped at 1.
 * **Students** (ten per size, seeds 1-10): the teacher's gains and biases permuted within
   the excitatory and within the inhibitory neurons, gains halved; only these trained, on
-  the next token (cross-entropy): 10,000 steps (82M tokens), Adam at a peak learning
-  rate of 1e-3, gradient norm clipped at 2. One **control student** per size starts from
-  the teacher's own gains and biases.
-* **Learning rate**, every run: linear warmup over the first 5% of the steps (teachers
-  1,250, students 500), then linear decay to zero.
+  the next token (cross-entropy), with the teacher's schedule: 25,000 steps (205M
+  tokens), Adam at a peak learning rate of 3e-3; gradient norm clipped at 2. One
+  **control student** per size starts from the teacher's own gains and biases. (Until
+  2026-11-08 students and controls trained for 10,000 steps at a peak of 1e-3; their
+  errors were still falling when the learning rate reached zero, so they were rerun with
+  `../rerun_students.sh`. The earlier runs are in `superseded/20261108/` in the output
+  folder.)
+* **Learning rate**, every run: linear warmup over the first 5% of the steps (1,250),
+  then linear decay to zero.
 * **Measurements**: as in `../task-complexity`, on 64 validation segments of 256 tokens
   (after 32 tokens from rest): task loss, KL divergence from the teacher, activity error,
   per-neuron correlation, gain and bias errors, each next to its shuffled-neuron
@@ -79,11 +83,17 @@ its command plus `--resume`. `summarize.py` reads these runs and, as the 300-neu
 
 ## Results
 
-**At every size, students that learn the task take on the teacher's activity, and their
-gains and biases are recovered less well the larger the network.** The trained students'
-activity error is 0.4-0.5% of the shuffled-neuron baseline at 300, 600 and 900 neurons;
-their gain error rises from 0.55 to 0.72 of the baseline, and their biases end further from
-the teacher's than shuffled ones (1.66-1.95). Figures and tables are in
+**At every size, students that learn the task take on the teacher's activity; their gains
+and biases are recovered less well at 600 and 900 neurons than at 300.** The trained
+students' activity error is 0.03-0.05% of the shuffled-neuron baseline at 300, 600 and 900
+neurons. Their gain error is 0.23 of the baseline at 300 neurons and 0.41 and 0.39 at 600
+and 900; their biases end as far from the teacher's as shuffled ones at 300 neurons (1.02)
+and further at 600 and 900 (1.79 and 1.81). Training alone moves the controls' gains
+0.15-0.20 and their biases 0.43-0.79 away from the teacher's. The students' gain and bias
+errors were still falling slowly when the learning rate reached zero (at 600 and 900
+neurons by 6-10% and 2-3% over the second half of training), so they are upper bounds.
+With the earlier schedule (10,000 steps at 1e-3) the students ended with activity errors
+of 0.4-0.5%, gain errors of 0.55-0.72 and bias errors of 1.66-1.95. Figures and tables are in
 `/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/network-size/figures`
 (also `traces_n600.png` and `traces_n900.png`: 64 tokens of validation text, the probability
 of the actual next token and two example neurons' rates, teacher vs the best student before
@@ -99,8 +109,8 @@ Students (ten per size, shuffled start; median [min, max]; errors relative to th
 shuffled-neuron baseline, for 1 - mean abs r 0.89-0.91; the readout reads every direction of
 the activity):
 
-| neurons | solved | task loss above the teacher's (%) | activity error, start -> end | 1 - mean abs r | gain error | bias error | control: activity error |
-|---|---|---|---|---|---|---|---|
-| 300 | 10 of 10 | 0.48 [0.41, 0.58] | 0.51 -> 0.0038 [0.0034, 0.0039] | 0.0018 | 0.55 | 1.66 | 4.1e-5 |
-| 600 | 10 of 10 | 0.56 [0.49, 1.31] | 0.39 -> 0.0048 [0.0043, 0.0095] | 0.0038 | 0.70 | 1.95 | 8.4e-5 |
-| 900 | 10 of 10 | 0.88 [0.83, 1.10] | 0.36 -> 0.0036 [0.0033, 0.0041] | 0.0050 | 0.72 | 1.94 | 5.5e-5 |
+| neurons | solved | task loss above the teacher's (%) | activity error, start -> end | 1 - mean abs r | gain error | bias error | control: activity error | control: gain / bias error |
+|---|---|---|---|---|---|---|---|---|
+| 300 | 10 of 10 | -0.02 [-0.03, -0.00] | 0.51 -> 0.00048 [0.00045, 0.00053] | 0.00033 | 0.23 | 1.02 | 1.6e-4 | 0.15 / 0.43 |
+| 600 | 10 of 10 | -0.06 [-0.07, 0.75] | 0.39 -> 0.00055 [0.00053, 0.0056] | 0.00059 | 0.41 | 1.79 | 2.2e-4 | 0.20 / 0.79 |
+| 900 | 10 of 10 | -0.03 [-0.05, 0.10] | 0.36 -> 0.00030 [0.00029, 0.00055] | 0.00075 | 0.39 | 1.81 | 1.1e-4 | 0.17 / 0.67 |

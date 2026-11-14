@@ -54,8 +54,10 @@ with biophysical neurons, on the same token task.
   decay, every tensor's gradient clipped at 1.
 * **Students** (ten per network, seeds 1-10): the teacher's single-neuron parameters,
   every parameter permuted within the excitatory and within the inhibitory neurons; only
-  these trained, 2,000 steps (16M tokens), peak learning rate 1e-3, gradient norm clipped
-  at 2. One **control** per network starts from the teacher's own.
+  these trained, with the teacher's schedule (5,000 steps, peak learning rate 3e-3),
+  gradient norm clipped at 2. One **control** per network starts from the teacher's own.
+  (Until 2026-11-08 students and controls trained for 2,000 steps at a peak of 1e-3; see
+  Results.)
 * **Learning rate**: linear warmup over the first 5% of the steps, then linear decay to
   zero.
 * **Measurements**: as in `../task-complexity` (task loss, KL divergence from the teacher,
@@ -103,8 +105,8 @@ cancelled after about 1,000 steps and is in `superseded/20261101/` in the output
    teacher: 0.002), all but the readout 4.06 and 4.98 (1.83).
 2. Full runs at 1,024 neurons, both models (`submit.sh`): the teacher with the surrogate
    gradient (`na_activation_gradient = 0.1`) at peak learning rate 3e-3 for 5,000 steps,
-   then its ten students (shuffled start) and the control, 2,000 steps each. Then 4,096
-   neurons.
+   then its ten students (shuffled start) and the control with the same schedule (first
+   with 2,000 steps at 1e-3; redone on 2026-11-08). Then 4,096 neurons.
 
 ## Running
 
@@ -125,18 +127,32 @@ bash submit.sh  # stage 2: per model, the teacher, then its ten students and the
 
 ## Results (stage 2)
 
-**The spiking students learn the task only partly, and neither their activity nor their
-single-neuron parameters come close to the teacher's.** After 2,000 steps the students'
-task loss is 11% (Pospischil) and 16% (Hodgkin-Huxley) above the teacher's, their activity
-error 16% and 29% of the shuffled-neuron baseline (the rate networks' students: 0.4%), and
-their spike counts' correlation error 0.47 and 0.44 (shuffled: 0.97). Some conductances move
-part of the way to the teacher's (Pospischil gK 0.57, gLeak 0.74; Hodgkin-Huxley gNa 0.78,
-gLeak 0.77 of the baseline's error), others do not (Hodgkin-Huxley gK 1.12, bias 1.09). The
-controls stay at the teacher's solution (activity error 0.01; their parameters drift by
-4-14% of the baseline). Figures and tables are in
+**The spiking students learn the task and take on the teacher's activity, but not its
+single-neuron parameters.** With the teacher's schedule their task loss ends 0.5%
+(Pospischil) and 0.03% (Hodgkin-Huxley) above the teacher's, their activity error at 3.0%
+and 1.8% of the shuffled-neuron baseline (the controls: 1.9% and 1.3%; the rate networks'
+students: 0.02-0.06%), and their spike counts' correlation error at 0.32 and 0.15 (controls
+0.22 and 0.12; shuffled 0.97). Their parameters end 0.17-0.78 (Pospischil) and 0.23-1.36
+(Hodgkin-Huxley) of the baseline's error away from the teacher's, and the ten students of a
+model end at nearly the same errors. The teacher's parameters are not where training stays
+either: at an unchanged task loss, the controls' parameters move 0.14-0.64 (Pospischil) and
+0.14-0.53 (Hodgkin-Huxley) away from them. Over the second half of training the students'
+errors in gNa and gLeak were still falling (by 14-29%), those in gK, gKm and the biases
+hardly (Pospischil: by less than 4%; Hodgkin-Huxley: gK by 9%, the biases by 1%).
+
+Until 2026-11-08 students and controls trained for 2,000 steps at a peak learning rate of
+1e-3, a third of the teacher's. Those students ended 11% and 16% above the teacher's task
+loss with activity errors of 16% and 29%, still improving when the learning rate reached
+zero: Adam moves a parameter by about the learning rate per step, about 1 unit over that
+schedule, and the shuffled starts are 1.3-1.7 units from the teacher's values in gNa, gKm
+and gLeak. They were rerun with `../rerun_students.sh`; the earlier runs are in
+`superseded/20261108/` in the output folder, and `../cell-types/probes/student_budget`
+there compares the schedules.
+
+Figures and tables are in
 `/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/complex-neurons/figures`
-(`summarize.py`: `summary.md`, `training_curves.png`, `parameters.png`, `outcomes.png`;
-`../task-complexity/traces.py --task tokens --name <model>_n1024 --configs configs`:
+(`summarize.py`: `summary.md`, `training_curves.png`, `parameters.png`, `outcomes.png`,
+`by_group.png`; `../task-complexity/traces.py --task tokens --name <model>_n1024 --configs configs`:
 `traces_<model>_n1024.png`, the probability of the actual next token and two example
 neurons' window-mean voltages, teacher vs the best student before and after training).
 
@@ -150,17 +166,18 @@ shuffled-neuron baseline; the readout reads every direction of the activity):
 
 | | Pospischil | Hodgkin-Huxley |
 |---|---|---|
-| task loss above the teacher's (%), start -> end | 33 -> 10.8 [8.8, 12.6] | 44 -> 16.3 [15.4, 18.9] |
-| KL from the teacher (bits/token) | 0.47 | 0.74 |
-| activity error, start -> end | 0.27 -> 0.157 [0.139, 0.175] | 0.43 -> 0.293 [0.258, 0.338] |
-| 1 - mean abs r (shuffled) | 0.107 (0.955) | 0.178 (0.95) |
-| spike counts: 1 - correlation (shuffled) | 0.47 (0.97) | 0.44 (0.97) |
-| gNa / gK / gKm / gLeak / bias error | 0.92 / 0.57 / 0.88 / 0.74 / 0.88 | 0.78 / 1.12 / - / 0.77 / 1.09 |
-| firing rate (teacher's) | 24.3 Hz (23.4) | 24.3 Hz (20.8) |
-| control: activity error | 0.010 | 0.0089 |
+| task loss above the teacher's (%), start -> end | 33 -> 0.48 [0.27, 0.63] | 44 -> 0.03 [-0.02, 0.10] |
+| KL from the teacher (bits/token) | 0.078 | 0.034 |
+| activity error, start -> end | 0.27 -> 0.030 [0.029, 0.033] | 0.43 -> 0.018 [0.017, 0.019] |
+| 1 - mean abs r (shuffled) | 0.036 (0.955) | 0.028 (0.95) |
+| spike counts: 1 - correlation (shuffled) | 0.32 (0.97) | 0.15 (0.97) |
+| gNa / gK / gKm / gLeak / bias error | 0.52 / 0.51 / 0.78 / 0.17 / 0.60 | 0.26 / 0.66 / - / 0.23 / 1.36 |
+| firing rate (teacher's) | 18.6 Hz (23.4) | 20.5 Hz (20.8) |
+| control: activity error | 0.019 | 0.013 |
+| control: gNa / gK / gKm / gLeak / bias error | 0.26 / 0.19 / 0.64 / 0.14 / 0.36 | 0.35 / 0.42 / - / 0.14 / 0.53 |
+| control: firing rate | 20.9 Hz | 21.6 Hz |
 
 Against the first stage 2 (75-wide input and readout; numbers from its notes, the runs were
 removed): the teachers are better (3.96 and 4.10 bits/token then) and fire about half as
-fast (40 and 39 Hz then); the Hodgkin-Huxley students end further from their teacher (task
-loss 11-13.5% above it then, activity error 0.21-0.25), with gNa and biases closer to the
-teacher's (0.88-0.94 and 1.55-1.68 then).
+fast (40 and 39 Hz then). Its students trained with the earlier schedule (2,000 steps at
+1e-3).

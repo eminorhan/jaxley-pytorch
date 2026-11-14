@@ -25,8 +25,9 @@ config per arm in `configs/`, with `fan_in = 150` in place of `connection_prob =
   neurons this draws `../task-complexity`'s network exactly, so its token runs are the
   first size.
 * **Everything else** as in `../network-size`: the task, the teachers (25,000 steps, Adam
-  at a peak learning rate of 3e-3), ten students per size (10,000 steps, peak 1e-3), the
-  control, the measurements.
+  at a peak learning rate of 3e-3), ten students per size with the teacher's schedule
+  (until 2026-11-08: 10,000 steps at a peak of 1e-3; those runs are in
+  `superseded/20261108/` in the output folder), the control, the measurements.
 
 ## The 900-neuron teacher and the readout bias
 
@@ -71,9 +72,13 @@ bash submit.sh        # per size, one H100: the teacher, then 10 students and a 
 ## Results
 
 **At a fixed fan-in of 150 the pattern is that of `../network-size`: the students take on
-the teacher's activity at every size, and their gains and biases are not recovered.** Their
-gains are recovered a little better than in the dense networks of the same size (gain error
-0.64 and 0.66 of the baseline at 600 and 900 neurons, against 0.70 and 0.72). Figures and
+the teacher's activity at every size, and their gains and biases are recovered less well
+at 600 and 900 neurons than at 300.** Their gains end where those of the dense networks of
+the same size do (gain error 0.41 and 0.39 of the baseline at 600 and 900 neurons in both
+series); their biases end a little closer to the teacher's than in the dense networks
+(1.55 and 1.52, against 1.79 and 1.81), still further than shuffled ones. With the earlier
+schedule (10,000 steps at 1e-3) the gain errors were 0.64 and 0.66 and the bias errors
+1.90 and 1.76. Figures and
 tables are in `/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-connectome/sparsity/figures`
 (also `traces_n600.png` and `traces_n900.png`, as in `../network-size`).
 
@@ -86,8 +91,8 @@ tables are in `/nrs/scicompsoft/orhane/jaxley-pytorch-experiments/activitome-con
 Students (ten per size, shuffled start; median [min, max]; errors relative to the
 shuffled-neuron baseline, for 1 - mean abs r 0.89-0.91):
 
-| neurons | solved | task loss above the teacher's (%) | activity error, start -> end | 1 - mean abs r | gain error | bias error | control: activity error |
-|---|---|---|---|---|---|---|---|
-| 300 | 10 of 10 | 0.48 [0.41, 0.58] | 0.51 -> 0.0038 [0.0034, 0.0039] | 0.0018 | 0.55 | 1.66 | 4.1e-5 |
-| 600 | 10 of 10 | 0.32 [0.29, 0.70] | 0.40 -> 0.0036 [0.0033, 0.0060] | 0.0026 | 0.64 | 1.90 | 1.0e-4 |
-| 900 | 10 of 10 | 0.67 [0.52, 1.23] | 0.40 -> 0.0036 [0.0029, 0.0053] | 0.0044 | 0.66 | 1.76 | 6.0e-5 |
+| neurons | solved | task loss above the teacher's (%) | activity error, start -> end | 1 - mean abs r | gain error | bias error | control: activity error | control: gain / bias error |
+|---|---|---|---|---|---|---|---|---|
+| 300 | 10 of 10 | -0.02 [-0.03, -0.00] | 0.51 -> 0.00048 [0.00045, 0.00053] | 0.00033 | 0.23 | 1.02 | 1.6e-4 | 0.15 / 0.43 |
+| 600 | 10 of 10 | -0.02 [-0.04, 0.30] | 0.40 -> 0.00064 [0.00063, 0.0025] | 0.00058 | 0.41 | 1.55 | 2.4e-4 | 0.17 / 0.64 |
+| 900 | 10 of 10 | -0.06 [-0.07, 0.43] | 0.40 -> 0.00034 [0.00033, 0.0018] | 0.00075 | 0.39 | 1.52 | 1.0e-4 | 0.16 / 0.53 |

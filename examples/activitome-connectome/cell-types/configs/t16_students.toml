@@ -17,15 +17,15 @@ eval_length = 256
 
 [trainer]
 trainable = ["gNa", "gK", "gKm", "gLeak", "bias"]
-steps = 2000
-warmup_steps = 100
+steps = 5000
+warmup_steps = 250
 batch = 32
-lr = 1e-3  # task-complexity's student recipe
+lr = 5e-3  # the teacher's schedule
 optimizer = "adamw"
 weight_decay = 0.0
 clip = 2.0
 clip_mode = "global"
-eval_every = 100
+eval_every = 250
 log_every = 10
 dtype = "float32"
 checkpoint_every = 500
